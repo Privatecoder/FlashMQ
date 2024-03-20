@@ -17,6 +17,7 @@ See LICENSE for license details.
 #include <memory>
 #include <chrono>
 #include <vector>
+#include <optional>
 
 #include "forward_declarations.h"
 
@@ -130,7 +131,7 @@ enum class ReasonCodes
     TopicAliasInvalid = 148,
     PacketTooLarge = 149,
     MessageRateTooHigh = 150,
-    QuoteExceeded = 151,
+    QuotaExceeded = 151,
     AdministrativeAction = 152,
     PayloadFormatInvalid = 153,
     RetainNotSupported = 154,
@@ -311,8 +312,8 @@ struct Connect
     bool clean_start = true;
     bool bridgeProtocolBit = false;
     std::string clientid;
-    std::string username;
-    std::string password;
+    std::optional<std::string> username;
+    std::optional<std::string> password;
     uint16_t keepalive = 60;
     std::shared_ptr<WillPublish> will;
     std::shared_ptr<Mqtt5PropertyBuilder> propertyBuilder;

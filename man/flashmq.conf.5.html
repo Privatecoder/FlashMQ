@@ -177,10 +177,27 @@
         </dd>
       
       
+        <dt id="log_level"><code class="option">log_level</code> <code class="replaceable">info/notice/warning/error/none</code><a class="hash-anchor" href="#log_level">#</a></dt>
+        <dd>
+          <p>
+            Set the log level to specified level and above. That means <code class="replaceable">notice</code> will log <code class="replaceable">notice</code>, <code class="replaceable">warning</code> and <code class="replaceable">error</code>.
+          </p>
+          <p>
+            Use this setting over the deprecated <code class="option">log_debug</code> and <code class="option">quiet</code>. If you do have those directives, they override the <code class="option">log_level</code>, for backwards compatability reasons.
+          </p>
+          <p>
+            Default value: <code class="literal">info</code>.
+          </p>
+        </dd>
+      
+      
         <dt id="log_debug"><code class="option">log_debug</code> <code class="replaceable">true/false</code><a class="hash-anchor" href="#log_debug">#</a></dt>
         <dd>
           <p>
             Debug logging obviously creates a lot of log noise, so should only be done to diagnose problems.
+          </p>
+          <p>
+              Deprecated. Use <code class="option">log_level</code> instead.
           </p>
           <p>
             Default value: <code class="literal">false</code>
@@ -288,6 +305,32 @@
         <dt id="allow_anonymous"><code class="option">allow_anonymous</code> <code class="replaceable">true/false</code><a class="hash-anchor" href="#allow_anonymous">#</a></dt>
         <dd>
           <p>
+              This option can be overriden on a per-listener basis; see <a href="#listen__allow_anonymous"><code class="option">listener.allow_anonymous</code></a>.
+          </p>
+          <p>
+            Default value: <code class="literal">false</code>
+          </p>
+        </dd>
+      
+      
+        <dt id="zero_byte_username_is_anonymous"><code class="option">zero_byte_username_is_anonymous</code> <code class="replaceable">true/false</code><a class="hash-anchor" href="#zero_byte_username_is_anonymous">#</a></dt>
+        <dd>
+          <p>
+            The proper way to signal an anonymous client is by setting the 'username present' flag in the CONNECT packet to 0, which in MQTT3 also demands the absence of a password. However, there are also clients out there that set the 'username present' flag to 1 and then give an empty username. This is an undesirable situation, because it means there are two ways to identify an anonymous client.
+          </p>
+
+          <p>
+            Anonymous clients are not authenticated against a loaded plugin when <code class="option">allow_anonymous</code> is true. With this option enabled, that means users with empty string as usernames also aren't.
+          </p>
+
+          <p>
+            With this option disabled, clients connecting with an empty username will be reject with 'bad username or password' as MQTT error code.
+          </p>
+
+          <p>
+            The default is to be unambigious, but this can be overridden with this option.
+          </p>
+          <p>
             Default value: <code class="literal">false</code>
           </p>
         </dd>
@@ -319,6 +362,9 @@
         <dd>
           <p>
             Don't log LOG_INFO and LOG_NOTICE. This is useful when you have a lot of foot traffic, because otherwise the log gets filled with connect/disconnect notices.
+          </p>
+          <p>
+              Deprecated. Use <code class="option">log_level</code> instead.
           </p>
           <p>
             Default value: <code class="literal">false</code>
@@ -684,6 +730,15 @@
       
 
       
+        <dt id="listen__allow_anonymous"><code class="option">allow_anonymous</code> <code class="replaceable">true/false</code><a class="hash-anchor" href="#listen__allow_anonymous">#</a></dt>
+        <dd>
+          <p>
+            This allows you to override the <a href="#allow_anonymous">global <code class="option">allow_anonymous</code></a> setting on the listener level.
+          </p>
+        </dd>
+      
+
+      
         <dt id="haproxy"><code class="option">haproxy</code> <code class="replaceable">true/false</code><a class="hash-anchor" href="#haproxy">#</a></dt>
         <dd>
           <p>
@@ -747,8 +802,8 @@ listen {
   port 2883
   haproxy on
 }</pre>
-  </section><section class="refsect1">
-    <header><h2>Bridge configuration</h2></header>
+  </section><section class="refsect1" id="bridge">
+    <header><h2>Bridge configuration<a class="hash-anchor" href="#bridge">#</a></h2></header>
     <p>
        Bridges can be defined inside <code class="literal">bridge { }</code> blocks. A bridge is essentially just an outgoing connection to another server with loop-detection and retain flag relaying. It is not a form of clustering. Also note that one bridge is one connection, and because FlashMQ's threading model is that clients are serviced by one selected thread only, a bridge has the potential to saturate a thread, if it's heavily loaded. You could work around that by defining multiple bridges to the same server, for various topic paths. A future version of FlashMQ will likely improve upon this.
     </p>
@@ -857,19 +912,31 @@ listen {
       
 
       
-        <dt id="bridge__publish"><code class="option">publish</code> <code class="replaceable">filter</code><a class="hash-anchor" href="#bridge__publish">#</a></dt>
+        <dt id="bridge__publish"><code class="option">publish</code> <code class="replaceable">filter</code> <code class="replaceable">qos</code><a class="hash-anchor" href="#bridge__publish">#</a></dt>
         <dd>
           <p>
               Messages matching this filter will be published to the other side. Examples: <code class="literal">#</code> or <code class="literal">sport/tennis/#</code>. This option can be repeated several times.
+          </p>
+          <p>
+            The QoS value should be seen as the QoS value of the internal subscription causing outgoing messages. Messages that are relayed have this QoS level at most.
+          </p>
+          <p>
+              Default: <code class="literal">0</code>
           </p>
         </dd>
       
 
       
-        <dt id="bridge__subscribe"><code class="option">subscribe</code> <code class="replaceable">filter</code><a class="hash-anchor" href="#bridge__subscribe">#</a></dt>
+        <dt id="bridge__subscribe"><code class="option">subscribe</code> <code class="replaceable">filter</code> <code class="replaceable">qos</code><a class="hash-anchor" href="#bridge__subscribe">#</a></dt>
         <dd>
           <p>
               Subscriptions for this filter is placed at the other side. Examples: <code class="literal">#</code> or <code class="literal">sport/tennis/#</code>. This option can be repeated several times.
+          </p>
+          <p>
+            The QoS value is like any subscription at a server. Messages received by the other end will be given this QoS level at most.
+          </p>
+          <p>
+              Default: <code class="literal">0</code>
           </p>
         </dd>
       

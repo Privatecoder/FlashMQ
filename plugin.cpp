@@ -21,6 +21,9 @@ See LICENSE for license details.
 #include "exceptions.h"
 #include "unscopedlock.h"
 #include "utils.h"
+#include "client.h"
+#include "threadglobals.h"
+#include "threaddata.h"
 
 std::mutex Authentication::initMutex;
 std::mutex Authentication::deinitMutex;
@@ -169,7 +172,7 @@ void Authentication::cleanup()
     if (pluginFamily == PluginFamily::None)
         return;
 
-    logger->logf(LOG_INFO, "Cleaning up authentication.");
+    logger->logf(LOG_NOTICE, "Cleaning up authentication.");
 
     securityCleanup(false);
 
@@ -295,6 +298,26 @@ AuthResult Authentication::aclCheck(const std::string &clientid, const std::stri
     assert(retain || access == AclAccess::subscribe || !payload.empty());
 #endif
 
+    ThreadData *threadData = ThreadGlobals::getThreadData();
+
+    switch (access)
+    {
+    case AclAccess::read:
+        threadData->aclReadChecks.inc(1);
+        break;
+    case AclAccess::write:
+        threadData->aclWriteChecks.inc(1);
+        break;
+    case AclAccess::subscribe:
+        threadData->aclSubscribeChecks.inc(1);
+        break;
+    case AclAccess::register_will:
+        threadData->aclRegisterWillChecks.inc(1);
+        break;
+    default:
+        break;
+    }
+
     AuthResult firstResult = aclCheckFromMosquittoAclFile(clientid, username, subtopics, access);
 
     if (firstResult != AuthResult::success)
@@ -355,12 +378,29 @@ AuthResult Authentication::aclCheck(const std::string &clientid, const std::stri
 }
 
 AuthResult Authentication::unPwdCheck(const std::string &clientid, const std::string &username, const std::string &password,
-                                      const std::vector<std::pair<std::string, std::string>> *userProperties, const std::weak_ptr<Client> &client)
+                                      const std::vector<std::pair<std::string, std::string>> *userProperties, const std::weak_ptr<Client> &client,
+                                      const bool allowAnonymous)
 {
-    AuthResult firstResult = unPwdCheckFromMosquittoPasswordFile(username, password);
+    /*
+     * This first construct is designed so that even when you allow anonymous, user verification still works, with the password file or
+     * plugin. If login is denied based on a password file, the attempt is still given to the plugin. However, when the auth succeeds
+     * based on the password file, it's not given to the plugin anymore.
+     *
+     * Also, when you allow anonymous, loging in with a non-existing user will work. But, when the user does exist, it must match.
+     */
 
-    if (firstResult == AuthResult::success)
-        return firstResult;
+    AuthResult firstResult = allowAnonymous ? AuthResult::success : AuthResult::login_denied;
+
+    if (!this->mosquittoPasswordFile.empty())
+    {
+        const std::optional<AuthResult> r = unPwdCheckFromMosquittoPasswordFile(username, password);
+
+        if (r)
+            firstResult = r.value();
+
+        if (firstResult == AuthResult::success)
+            return firstResult;
+    }
 
     if (pluginFamily == PluginFamily::None)
         return firstResult;
@@ -779,15 +819,12 @@ AuthResult Authentication::aclCheckFromMosquittoAclFile(const std::string &clien
     return result;
 }
 
-AuthResult Authentication::unPwdCheckFromMosquittoPasswordFile(const std::string &username, const std::string &password)
+std::optional<AuthResult> Authentication::unPwdCheckFromMosquittoPasswordFile(const std::string &username, const std::string &password)
 {
-    if (this->mosquittoPasswordFile.empty() && settings.allowAnonymous)
-        return AuthResult::success;
-
     if (!this->mosquittoPasswordEntries)
         return AuthResult::login_denied;
 
-    AuthResult result = settings.allowAnonymous ? AuthResult::success : AuthResult::login_denied;
+    std::optional<AuthResult> result;
 
     auto it = mosquittoPasswordEntries->find(username);
     if (it != mosquittoPasswordEntries->end())

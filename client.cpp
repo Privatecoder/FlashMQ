@@ -569,7 +569,7 @@ void Client::sendOrQueueWill()
  */
 void Client::serverInitiatedDisconnect(ReasonCodes reason)
 {
-    setDisconnectReason(formatString("Server initiating disconnect with reason code '%d'", static_cast<uint8_t>(reason)));
+    setDisconnectReason("Server initiating disconnect with reason: " + reasonCodeToString(reason));
 
     if (this->protocolVersion >= ProtocolVersion::Mqtt5)
     {
@@ -687,7 +687,7 @@ void Client::setBridgeState(std::shared_ptr<BridgeState> bridgeState)
         this->address = bridgeState->c.address;
         this->clean_start = bridgeState->c.localCleanStart;
         this->clientid = bridgeState->c.getClientid();
-        this->username = bridgeState->c.local_username;
+        this->username = bridgeState->c.local_username.value_or(std::string());
         this->keepalive = bridgeState->c.keepalive;
 
         // Not setting maxOutgoingTopicAliasValue, because that must remain 0 until the other side says (in the connack) we can uses aliases.
@@ -1028,12 +1028,12 @@ X509ClientVerification Client::getX509ClientVerification() const
     return x509ClientVerification;
 }
 
+void Client::setAllowAnonymousOverride(const AllowListenerAnonymous allow)
+{
+    allowAnonymousOverride = allow;
+}
 
-
-
-
-
-
-
-
-
+AllowListenerAnonymous Client::getAllowAnonymousOverride() const
+{
+    return allowAnonymousOverride;
+}

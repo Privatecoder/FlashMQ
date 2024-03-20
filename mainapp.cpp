@@ -109,7 +109,7 @@ MainApp::MainApp(const std::string &configFilePath) :
         subscriptionStore->loadSessionsAndSubscriptions(settings.getSessionsDBFile());
     }
 
-    auto fSaveState = std::bind(&MainApp::saveStateInThread, this);
+    auto fSaveState = std::bind(&MainApp::queueSaveStateInThread, this);
     timer.addCallback(fSaveState, 900000, "Save state.");
 
     auto fSendPendingWills = std::bind(&MainApp::queueSendQueuedWills, this);
@@ -150,7 +150,7 @@ void MainApp::showLicense()
 #endif
 
     printf("FlashMQ Version %s %s\n", FLASHMQ_VERSION, sse.c_str());
-    puts("Copyright (C) 2021-2023 Wiebe Cazemier.");
+    puts("Copyright (C) 2021-2024 Wiebe Cazemier.");
     puts("License OSL3: Open Software License 3.0 <https://opensource.org/license/osl-3-0-php/>.");
     puts("");
     puts("Author: Wiebe Cazemier <wiebe@flashmq.org>");
@@ -280,8 +280,18 @@ void MainApp::saveStateInThread()
 
     auto f = std::bind(&MainApp::saveState, this->settings, bridgeInfos, true);
     this->bgWorker.addTask(f);
+}
 
-
+/**
+ * @brief MainApp::queueSaveStateInThread is a wrapper to be called from another thread, to make sure saveStateInThread() is called
+ * on the main loop.
+ */
+void MainApp::queueSaveStateInThread()
+{
+    std::lock_guard<std::mutex> locker(eventMutex);
+    auto f = std::bind(&MainApp::saveStateInThread, this);
+    taskQueue.push_back(f);
+    wakeUpThread();
 }
 
 void MainApp::queueSendQueuedWills()
@@ -381,7 +391,7 @@ void MainApp::saveState(const Settings &settings, const std::list<BridgeInfoForS
 
             MainApp::saveBridgeInfo(settings.getBridgeNamesDBFile(), bridgeInfos);
 
-            logger->logf(LOG_INFO, "Saving states done");
+            logger->logf(LOG_NOTICE, "Saving states done");
         }
     }
     catch(std::exception &ex)
@@ -393,7 +403,7 @@ void MainApp::saveState(const Settings &settings, const std::list<BridgeInfoForS
 void MainApp::saveBridgeInfo(const std::string &filePath, const std::list<BridgeInfoForSerializing> &bridgeInfos)
 {
     Logger *logger = Logger::getInstance();
-    logger->logf(LOG_INFO, "Saving bridge info in '%s'", filePath.c_str());
+    logger->logf(LOG_NOTICE, "Saving bridge info in '%s'", filePath.c_str());
     BridgeInfoDb bridgeInfoDb(filePath);
     bridgeInfoDb.openWrite();
     bridgeInfoDb.saveInfo(bridgeInfos);
@@ -410,7 +420,7 @@ void MainApp::loadBridgeInfo()
 
     try
     {
-        logger->logf(LOG_INFO, "Loading '%s'", filePath.c_str());
+        logger->logf(LOG_NOTICE, "Loading '%s'", filePath.c_str());
 
         BridgeInfoDb dbfile(filePath);
         dbfile.openRead();
@@ -734,10 +744,12 @@ void MainApp::start()
                     // Don't use std::make_shared to avoid the weak pointers keeping the control block in memory.
                     std::shared_ptr<Client> client = std::shared_ptr<Client>(new Client(fd, thread_data, clientSSL, listener->websocket, listener->isHaProxy(), addr, settings));
 
-                    if (listener->getX509ClientVerficiationMode() != X509ClientVerification::None)
+                    if (listener->getX509ClientVerficationMode() != X509ClientVerification::None)
                     {
-                        client->setSslVerify(listener->getX509ClientVerficiationMode());
+                        client->setSslVerify(listener->getX509ClientVerficationMode());
                     }
+
+                    client->setAllowAnonymousOverride(listener->allowAnonymous);
 
                     thread_data->giveClient(std::move(client));
 
@@ -880,7 +892,7 @@ bool MainApp::getFuzzMode() const
 void MainApp::setlimits()
 {
     rlim_t nofile = settings.rlimitNoFile;
-    logger->logf(LOG_INFO, "Setting rlimit nofile to %ld.", nofile);
+    logger->log(LOG_INFO) << "Setting rlimit nofile to " << nofile;
     struct rlimit v = { nofile, nofile };
     if (setrlimit(RLIMIT_NOFILE, &v) < 0)
     {
@@ -971,7 +983,8 @@ void MainApp::loadConfig(bool reload)
 
     logger->setLogPath(settings.logPath);
     logger->queueReOpen();
-    logger->setFlags(settings.logDebug, settings.logSubscriptions, settings.quiet);
+    logger->setFlags(settings.logLevel, settings.logSubscriptions);
+    logger->setFlags(settings.logDebug, settings.quiet);
 
     setlimits();
 

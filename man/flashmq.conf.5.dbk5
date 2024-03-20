@@ -121,11 +121,28 @@
           </para>
         </listitem>
       </varlistentry>
+      <varlistentry xml:id="log_level">
+        <term><option>log_level</option> <replaceable>info/notice/warning/error/none</replaceable></term>
+        <listitem>
+          <para>
+            Set the log level to specified level and above. That means <replaceable>notice</replaceable> will log <replaceable>notice</replaceable>, <replaceable>warning</replaceable> and <replaceable>error</replaceable>.
+          </para>
+          <para>
+            Use this setting over the deprecated <option>log_debug</option> and <option>quiet</option>. If you do have those directives, they override the <option>log_level</option>, for backwards compatability reasons.
+          </para>
+          <para>
+            Default value: <literal>info</literal>.
+          </para>
+        </listitem>
+      </varlistentry>
       <varlistentry xml:id="log_debug">
         <term><option>log_debug</option> <replaceable>true/false</replaceable></term>
         <listitem>
           <para>
             Debug logging obviously creates a lot of log noise, so should only be done to diagnose problems.
+          </para>
+          <para>
+              Deprecated. Use <option>log_level</option> instead.
           </para>
           <para>
             Default value: <literal>false</literal>
@@ -233,6 +250,32 @@
         <term><option>allow_anonymous</option> <replaceable>true/false</replaceable></term>
         <listitem>
           <para>
+              This option can be overriden on a per-listener basis; see <link xlink:href="#listen__allow_anonymous"><option>listener.allow_anonymous</option></link>.
+          </para>
+          <para>
+            Default value: <literal>false</literal>
+          </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry xml:id="zero_byte_username_is_anonymous">
+        <term><option>zero_byte_username_is_anonymous</option> <replaceable>true/false</replaceable></term>
+        <listitem>
+          <para>
+            The proper way to signal an anonymous client is by setting the 'username present' flag in the CONNECT packet to 0, which in MQTT3 also demands the absence of a password. However, there are also clients out there that set the 'username present' flag to 1 and then give an empty username. This is an undesirable situation, because it means there are two ways to identify an anonymous client.
+          </para>
+
+          <para>
+            Anonymous clients are not authenticated against a loaded plugin when <option>allow_anonymous</option> is true. With this option enabled, that means users with empty string as usernames also aren't.
+          </para>
+
+          <para>
+            With this option disabled, clients connecting with an empty username will be reject with 'bad username or password' as MQTT error code.
+          </para>
+
+          <para>
+            The default is to be unambigious, but this can be overridden with this option.
+          </para>
+          <para>
             Default value: <literal>false</literal>
           </para>
         </listitem>
@@ -264,6 +307,9 @@
         <listitem>
           <para>
             Don't log LOG_INFO and LOG_NOTICE. This is useful when you have a lot of foot traffic, because otherwise the log gets filled with connect/disconnect notices.
+          </para>
+          <para>
+              Deprecated. Use <option>log_level</option> instead.
           </para>
           <para>
             Default value: <literal>false</literal>
@@ -630,6 +676,15 @@
         </listitem>
       </varlistentry>
 
+      <varlistentry xml:id="listen__allow_anonymous">
+        <term><option>allow_anonymous</option> <replaceable>true/false</replaceable></term>
+        <listitem>
+          <para>
+            This allows you to override the <link xlink:href="#allow_anonymous">global <option>allow_anonymous</option></link> setting on the listener level.
+          </para>
+        </listitem>
+      </varlistentry>
+
       <varlistentry xml:id="haproxy">
         <term><option>haproxy</option> <replaceable>true/false</replaceable></term>
         <listitem>
@@ -698,7 +753,7 @@ listen {
 }]]></literallayout>
   </refsect1>
 
-  <refsect1>
+  <refsect1 xml:id="bridge">
     <title>Bridge configuration</title>
     <para>
        Bridges can be defined inside <literal>bridge { }</literal> blocks. A bridge is essentially just an outgoing connection to another server with loop-detection and retain flag relaying. It is not a form of clustering. Also note that one bridge is one connection, and because FlashMQ's threading model is that clients are serviced by one selected thread only, a bridge has the potential to saturate a thread, if it's heavily loaded. You could work around that by defining multiple bridges to the same server, for various topic paths. A future version of FlashMQ will likely improve upon this.
@@ -808,19 +863,31 @@ listen {
       </varlistentry>
 
       <varlistentry xml:id="bridge__publish">
-        <term><option>publish</option> <replaceable>filter</replaceable></term>
+        <term><option>publish</option> <replaceable>filter</replaceable> <replaceable>qos</replaceable></term>
         <listitem>
           <para>
               Messages matching this filter will be published to the other side. Examples: <literal>#</literal> or <literal>sport/tennis/#</literal>. This option can be repeated several times.
+          </para>
+          <para>
+            The QoS value should be seen as the QoS value of the internal subscription causing outgoing messages. Messages that are relayed have this QoS level at most.
+          </para>
+          <para>
+              Default: <literal>0</literal>
           </para>
         </listitem>
       </varlistentry>
 
       <varlistentry xml:id="bridge__subscribe">
-        <term><option>subscribe</option> <replaceable>filter</replaceable></term>
+        <term><option>subscribe</option> <replaceable>filter</replaceable> <replaceable>qos</replaceable></term>
         <listitem>
           <para>
               Subscriptions for this filter is placed at the other side. Examples: <literal>#</literal> or <literal>sport/tennis/#</literal>. This option can be repeated several times.
+          </para>
+          <para>
+            The QoS value is like any subscription at a server. Messages received by the other end will be given this QoS level at most.
+          </para>
+          <para>
+              Default: <literal>0</literal>
           </para>
         </listitem>
       </varlistentry>

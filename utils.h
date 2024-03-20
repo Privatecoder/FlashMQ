@@ -149,6 +149,8 @@ T get_random_int()
 void exceptionOnNonMqtt(const std::vector<char> &data);
 
 uint16_t getFirstWildcardDepth(const std::vector<std::string> &subtopics);
+std::string reasonCodeToString(ReasonCodes code);
+std::string packetTypeToString(PacketType ptype);
 
 
 #endif // UTILS_H

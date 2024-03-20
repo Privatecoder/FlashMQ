@@ -1,4 +1,7 @@
-#include "tst_maintests.h"
+#include "maintests.h"
+#include "testhelpers.h"
+#include "conffiletemp.h"
+#include "flashmqtestclient.h"
 
 #include <sys/sysinfo.h>
 
@@ -939,7 +942,7 @@ void MainTests::testAlsoDontApproveOnErrorInPluginWithWildcardDenyMode()
     {
         receiver.subscribe("#", 0);
     }
-    catch (SubAckIsError)
+    catch (SubAckIsError &ex)
     {
         suback_errored = true;
     }
@@ -993,7 +996,7 @@ void MainTests::testDenyWildcardSubscription()
     {
         receiver.subscribe("bla/#", 0);
     }
-    catch (SubAckIsError)
+    catch (SubAckIsError &ex)
     {
         suback_errored = true;
     }

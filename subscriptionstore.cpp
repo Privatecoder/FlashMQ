@@ -1407,7 +1407,7 @@ void SubscriptionStore::expireRetainedMessages(RetainedMessageNode *this_node, c
 
 void SubscriptionStore::saveRetainedMessages(const std::string &filePath, bool sleep_after_limit)
 {
-    logger->logf(LOG_INFO, "Saving retained messages to '%s'", filePath.c_str());
+    logger->logf(LOG_NOTICE, "Saving retained messages to '%s'", filePath.c_str());
 
     std::vector<RetainedMessage> result;
     int64_t reserve = std::max<int64_t>(retainedMessageCount, 0);
@@ -1450,7 +1450,7 @@ void SubscriptionStore::loadRetainedMessages(const std::string &filePath)
 {
     try
     {
-        logger->logf(LOG_INFO, "Loading '%s'", filePath.c_str());
+        logger->logf(LOG_NOTICE, "Loading '%s'", filePath.c_str());
 
         RetainedMessagesDB db(filePath);
         db.openRead();
@@ -1469,7 +1469,7 @@ void SubscriptionStore::loadRetainedMessages(const std::string &filePath)
 
 void SubscriptionStore::saveSessionsAndSubscriptions(const std::string &filePath)
 {
-    logger->logf(LOG_INFO, "Saving sessions and subscriptions to '%s' in thread.", filePath.c_str());
+    logger->logf(LOG_NOTICE, "Saving sessions and subscriptions to '%s' in thread.", filePath.c_str());
 
     const std::chrono::time_point<std::chrono::steady_clock> start = std::chrono::steady_clock::now();
 
@@ -1493,7 +1493,8 @@ void SubscriptionStore::saveSessionsAndSubscriptions(const std::string &filePath
     const std::chrono::time_point<std::chrono::steady_clock> doneCopying = std::chrono::steady_clock::now();
 
     const std::chrono::milliseconds copyDuration = std::chrono::duration_cast<std::chrono::milliseconds>(doneCopying - start);
-    logger->logf(LOG_DEBUG, "Collected %zu sessions and %zu subscriptions to save in %ld ms.", sessionPointers.size(), subscriptionCopies.size(), copyDuration.count());
+    logger->log(LOG_DEBUG) << "Collected " << sessionPointers.size() << " sessions and " << subscriptionCopies.size()
+                           << " subscriptions to save, in " << copyDuration.count() << " ms.";
 
     SessionsAndSubscriptionsDB db(filePath);
     db.openWrite();
@@ -1502,15 +1503,15 @@ void SubscriptionStore::saveSessionsAndSubscriptions(const std::string &filePath
     const std::chrono::time_point<std::chrono::steady_clock> doneSaving = std::chrono::steady_clock::now();
 
     const std::chrono::milliseconds saveDuration = std::chrono::duration_cast<std::chrono::milliseconds>(doneSaving - doneCopying);
-    logger->logf(LOG_INFO, "Saved %zu sessions and %zu subscriptions to '%s' in %ld ms.",
-                 sessionPointers.size(), subscriptionCopies.size(), filePath.c_str(), saveDuration.count());
+    logger->log(LOG_INFO) << "Saved " << sessionPointers.size() << " sessions and " << subscriptionCopies.size()
+                          << " subscriptions to '" << filePath << "', in " << saveDuration.count() << " ms.";
 }
 
 void SubscriptionStore::loadSessionsAndSubscriptions(const std::string &filePath)
 {
     try
     {
-        logger->logf(LOG_INFO, "Loading '%s'", filePath.c_str());
+        logger->logf(LOG_NOTICE, "Loading '%s'", filePath.c_str());
 
         SessionsAndSubscriptionsDB db(filePath);
         db.openRead();

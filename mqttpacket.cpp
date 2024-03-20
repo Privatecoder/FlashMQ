@@ -263,8 +263,8 @@ MqttPacket::MqttPacket(const Connect &connect) :
     writeByte(protocolVersionByte);
 
     uint8_t flags = connect.clean_start << 1;
-    flags |= !connect.username.empty() << 7;
-    flags |= !connect.password.empty() << 6;
+    flags |= static_cast<unsigned int>(connect.username.has_value()) << 7;
+    flags |= static_cast<unsigned int>(connect.password.has_value()) << 6;
 
     if (connect.will)
     {
@@ -295,10 +295,10 @@ MqttPacket::MqttPacket(const Connect &connect) :
         writeString(connect.will->payload);
     }
 
-    if (!connect.username.empty())
-        writeString(connect.username);
-    if (!connect.password.empty())
-        writeString(connect.password);
+    if (connect.username.has_value())
+        writeString(connect.username.value());
+    if (connect.password.has_value())
+        writeString(connect.password.value());
 
     calculateRemainingLength();
 }
@@ -433,7 +433,7 @@ void MqttPacket::handle()
         {
             exceptionOnNonMqtt(this->bites);
 
-            logger->log(LOG_WARNING) << "Unapproved packet type (code " << static_cast<int>(packetType)
+            logger->log(LOG_WARNING) << "Unapproved packet type (" << packetTypeToString(packetType)
                                      << ") from non-authenticated client " << sender->repr() << ". Dropping packet.";
             return;
         }
@@ -531,6 +531,12 @@ ConnectData MqttPacket::parseConnectData()
 
     if (protocolVersion == ProtocolVersion::Mqtt5)
     {
+        /*
+         * MQTT5: "If the Session Expiry Interval is absent the value 0 is used. If it is set to 0, or is absent,
+         * the Session ends when the Network Connection is closed."
+         */
+        result.session_expire = 0;
+
         result.keep_alive = std::max<uint16_t>(result.keep_alive, 5);
 
         const size_t proplen = decodeVariableByteIntAtPos();
@@ -543,7 +549,7 @@ ConnectData MqttPacket::parseConnectData()
             switch (prop)
             {
             case Mqtt5Properties::SessionExpiryInterval:
-                result.session_expire = std::min<uint32_t>(readFourBytesToUint32(), result.session_expire);
+                result.session_expire = std::min<uint32_t>(readFourBytesToUint32(), settings.getExpireSessionAfterSeconds());
                 break;
             case Mqtt5Properties::ReceiveMaximum:
                 result.client_receive_max = std::min<int16_t>(readTwoBytesToUInt16(), result.client_receive_max);
@@ -673,11 +679,22 @@ ConnectData MqttPacket::parseConnectData()
 
     if (user_name_flag)
     {
+        // Usernames must be UTF-8, but we defer that check so we can give proper a CONNACK, and continue parsing.
         result.username = readBytesToString(false);
-        result.willpublish.username = result.username.value();
 
         if (result.username.value().empty())
-            throw ProtocolError("Username flagged as present, but it's 0 bytes.", ReasonCodes::MalformedPacket);
+        {
+            if (settings.zeroByteUsernameIsAnonymous)
+                result.username.reset();
+            else
+                throw ProtocolError("Attempting anonymous login with zero byte username. See config option 'zero_byte_username_is_anonymous'.",
+                                    ReasonCodes::BadUserNameOrPassword);
+        }
+    }
+
+    if (result.username)
+    {
+        result.willpublish.username = result.username.value();
 
         if (!settings.allowUnsafeUsernameChars && containsDangerousCharacters(result.username.value()))
             throw ProtocolError(formatString("Username '%s' contains unsafe characters and 'allow_unsafe_username_chars' is false.", result.username.value().c_str()),
@@ -686,15 +703,12 @@ ConnectData MqttPacket::parseConnectData()
 
     if (result.password_flag)
     {
-        if (this->protocolVersion <= ProtocolVersion::Mqtt311 && !result.username)
+        if (this->protocolVersion <= ProtocolVersion::Mqtt311 && !user_name_flag)
         {
             throw ProtocolError("MQTT 3.1.1: If the User Name Flag is set to 0, the Password Flag MUST be set to 0.", ReasonCodes::MalformedPacket);
         }
 
         result.password = readBytesToString(false);
-
-        if (result.password.empty())
-            throw ProtocolError("Password flagged as present, but it's 0 bytes.", ReasonCodes::MalformedPacket);
     }
 
     return  result;
@@ -751,7 +765,7 @@ ConnAckData MqttPacket::parseConnAckData()
             case Mqtt5Properties::ReasonString:
             {
                 const std::string reason = readBytesToString();
-                logger->logf(LOG_INFO, "ConnAck reason string: %s", reason.c_str());
+                logger->logf(LOG_NOTICE, "ConnAck reason string: %s", reason.c_str());
                 break;
             }
             case Mqtt5Properties::UserProperty:
@@ -813,8 +827,7 @@ void MqttPacket::handleConnect()
 
     if (this->protocolVersion == ProtocolVersion::None)
     {
-        if (this->protocolVersion == ProtocolVersion::None)
-            logger->logf(LOG_ERR, "Rejecting because of invalid protocol version: %s", sender->repr().c_str());
+        logger->logf(LOG_ERR, "Rejecting because of invalid protocol version: %s", sender->repr().c_str());
 
         // The specs are unclear when to use the version 3 codes or version 5 codes when you don't know which protocol version to speak.
         ProtocolVersion fuzzyProtocolVersion = connectData.protocol_level_byte < 0x05 ? ProtocolVersion::Mqtt31 : ProtocolVersion::Mqtt5;
@@ -943,7 +956,13 @@ void MqttPacket::handleConnect()
     AuthResult authResult = AuthResult::login_denied;
     std::string authReturnData;
 
-    if (!connectData.username && connectData.authenticationMethod.empty() && settings.allowAnonymous)
+    bool allowAnonymous = settings.allowAnonymous;
+    if (sender->getAllowAnonymousOverride() != AllowListenerAnonymous::None)
+    {
+        allowAnonymous = sender->getAllowAnonymousOverride() == AllowListenerAnonymous::Yes;
+    }
+
+    if (!connectData.username && connectData.authenticationMethod.empty() && allowAnonymous)
     {
         authResult = AuthResult::success;
     }
@@ -954,7 +973,7 @@ void MqttPacket::handleConnect()
     }
     else if (connectData.authenticationMethod.empty())
     {
-        authResult = authentication.unPwdCheck(connectData.client_id, username, connectData.password, getUserProperties(), sender);
+        authResult = authentication.unPwdCheck(connectData.client_id, username, connectData.password, getUserProperties(), sender, allowAnonymous);
     }
     else
     {
@@ -1211,7 +1230,7 @@ void MqttPacket::handleDisconnect()
 
     DisconnectData data = parseDisconnectData();
 
-    std::string disconnectReason = formatString("MQTT Disconnect received (code %d).", static_cast<uint8_t>(data.reasonCode));
+    std::string disconnectReason = "MQTT Disconnect received (reason '" + reasonCodeToString(data.reasonCode) + "').";
 
     if (!data.reasonString.empty())
         disconnectReason += data.reasonString;
