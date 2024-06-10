@@ -18,6 +18,7 @@ See LICENSE for license details.
 #include <arpa/inet.h>
 #include <memory>
 #include <malloc.h>
+#include <netinet/tcp.h>
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -114,11 +115,17 @@ MainApp::MainApp(const std::string &configFilePath) :
 
     auto fSendPendingWills = std::bind(&MainApp::queueSendQueuedWills, this);
     timer.addCallback(fSendPendingWills, 2000, "Publish pending wills.");
+
+    auto fInternalHeartbeat = std::bind(&MainApp::queueInternalHeartbeat, this);
+    timer.addCallback(fInternalHeartbeat, HEARTBEAT_INTERVAL, "Internal heartbeat.");
 }
 
 MainApp::~MainApp()
 {
-    if (epollFdAccept > 0)
+    if (taskEventFd >= 0)
+        close(taskEventFd);
+
+    if (epollFdAccept >= 0)
         close(epollFdAccept);
 }
 
@@ -190,6 +197,12 @@ std::list<ScopedSocket> MainApp::createListenSocket(const std::shared_ptr<Listen
             // Not needed for now. Maybe I will make multiple accept threads later, with SO_REUSEPORT.
             int optval = 1;
             check<std::runtime_error>(setsockopt(uniqueListenFd.get(), SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &optval, sizeof(optval)));
+
+            if (listener->isTcpNoDelay())
+            {
+                int tcp_nodelay_optval = 1;
+                check<std::runtime_error>(setsockopt(uniqueListenFd.get(), IPPROTO_TCP, TCP_NODELAY, &tcp_nodelay_optval, sizeof(tcp_nodelay_optval)));
+            }
 
             int flags = fcntl(uniqueListenFd.get(), F_GETFL);
             check<std::runtime_error>(fcntl(uniqueListenFd.get(), F_SETFL, flags | O_NONBLOCK ));
@@ -276,7 +289,7 @@ void MainApp::queuePublishStatsOnDollarTopic()
  */
 void MainApp::saveStateInThread()
 {
-    std::list<BridgeInfoForSerializing> bridgeInfos = BridgeInfoForSerializing::getBridgeInfosForSerializing(this->bridges);
+    std::list<BridgeInfoForSerializing> bridgeInfos = BridgeInfoForSerializing::getBridgeInfosForSerializing(this->bridgeConfigs);
 
     auto f = std::bind(&MainApp::saveState, this->settings, bridgeInfos, true);
     this->bgWorker.addTask(f);
@@ -334,12 +347,54 @@ void MainApp::queueRetainedMessageExpiration()
     }
 }
 
-void MainApp::createBridge(std::shared_ptr<ThreadData> &thread, const std::shared_ptr<BridgeConfig> &bridgeConfig)
+void MainApp::sendBridgesToThreads()
 {
-    std::shared_ptr<BridgeState> bridgeState = std::make_shared<BridgeState>(*bridgeConfig);
+    if (threads.empty())
+        return;
 
-    bridgeState->threadData = thread;
-    thread->giveBridge(bridgeState);
+    int i = 0;
+    auto bridge_pos = this->bridgeConfigs.begin();
+    while (bridge_pos != this->bridgeConfigs.end())
+    {
+        auto cur = bridge_pos;
+        bridge_pos++;
+
+        std::shared_ptr<BridgeConfig> bridge = cur->second;
+
+        if (!bridge)
+            continue;
+
+        std::shared_ptr<ThreadData> owner = bridge->owner.lock();
+
+        if (!owner)
+        {
+            owner = threads.at(i++ % threads.size());
+            bridge->owner = owner;
+        }
+
+        if (bridge->queueForDelete)
+        {
+            owner->removeBridgeQueued(bridge, "Bridge disappeared from config");
+            this->bridgeConfigs.erase(cur);
+        }
+        else
+        {
+            std::shared_ptr<BridgeState> bridgeState = std::make_shared<BridgeState>(*bridge);
+            bridgeState->threadData = owner;
+            owner->giveBridge(bridgeState);
+        }
+    }
+}
+
+void MainApp::queueSendBridgesToThreads()
+{
+    {
+        std::lock_guard<std::mutex> locker(eventMutex);
+        auto f = std::bind(&MainApp::sendBridgesToThreads, this);
+        taskQueue.push_back(f);
+    }
+
+    wakeUpThread();
 }
 
 void MainApp::queueBridgeReconnectAllThreads(bool alsoQueueNexts)
@@ -361,6 +416,49 @@ void MainApp::queueBridgeReconnectAllThreads(bool alsoQueueNexts)
     {
         auto fReconnectBridges = std::bind(&MainApp::queueBridgeReconnectAllThreads, this, false);
         timer.addCallback(fReconnectBridges, 5000, "Reconnect bridges.");
+    }
+}
+
+void MainApp::queueInternalHeartbeat()
+{
+    if (threads.empty())
+        return;
+
+    auto set_drift = [this](std::chrono::time_point<std::chrono::steady_clock> queue_time) {
+        const std::chrono::milliseconds main_loop_drift = drift.getDrift();
+        if (main_loop_drift > settings.maxEventLoopDrift)
+        {
+            Logger::getInstance()->log(LOG_WARNING) << "Main loop thread drift is " << main_loop_drift.count() << " ms.";
+        }
+        if (this->medianThreadDrift > settings.maxEventLoopDrift)
+        {
+            Logger::getInstance()->log(LOG_WARNING) << "Median thread drift is " << this->medianThreadDrift.count() << " ms.";
+        }
+
+        drift.update(queue_time);
+
+        std::vector<std::chrono::milliseconds> drifts(threads.size());
+
+        std::transform(threads.begin(), threads.end(), drifts.begin(), [] (const std::shared_ptr<const ThreadData> &t) {
+            return t->driftCounter.getDrift();
+        });
+
+        const size_t n = drifts.size() / 2;
+        std::nth_element(drifts.begin(), drifts.begin() + n, drifts.end());
+        this->medianThreadDrift = drifts.at(n);
+    };
+
+    {
+        auto call_set_drift = std::bind(set_drift, std::chrono::steady_clock::now());
+        std::lock_guard<std::mutex> locker(eventMutex);
+        taskQueue.push_back(call_set_drift);
+    }
+
+    wakeUpThread();
+
+    for (std::shared_ptr<ThreadData> &thread : threads)
+    {
+        thread->queueInternalHeartbeat();
     }
 }
 
@@ -409,12 +507,13 @@ void MainApp::saveBridgeInfo(const std::string &filePath, const std::list<Bridge
     bridgeInfoDb.saveInfo(bridgeInfos);
 }
 
-void MainApp::loadBridgeInfo()
+std::list<std::shared_ptr<BridgeConfig>> MainApp::loadBridgeInfo(Settings &settings)
 {
-    this->bridges = settings.stealBridges();
+    Logger *logger = Logger::getInstance();
+    std::list<std::shared_ptr<BridgeConfig>> bridges = settings.stealBridges();
 
     if (settings.storageDir.empty())
-        return;
+        return bridges;
 
     const std::string filePath = settings.getBridgeNamesDBFile();
 
@@ -428,7 +527,7 @@ void MainApp::loadBridgeInfo()
 
         for(const BridgeInfoForSerializing &info : bridgeInfos)
         {
-            for(std::shared_ptr<BridgeConfig> &bridgeConfig : this->bridges)
+            for(std::shared_ptr<BridgeConfig> &bridgeConfig : bridges)
             {
                 if (!bridgeConfig->useSavedClientId)
                     continue;
@@ -447,7 +546,7 @@ void MainApp::loadBridgeInfo()
         logger->logf(LOG_WARNING, "File '%s' is not there (yet)", filePath.c_str());
     }
 
-
+    return bridges;
 }
 
 void MainApp::initMainApp(int argc, char *argv[])
@@ -550,10 +649,12 @@ MainApp *MainApp::getMainApp()
 void MainApp::start()
 {
 #ifndef NDEBUG
+#ifndef TESTING
     if (!getFuzzMode())
     {
         oneInstanceLock.lock();
     }
+#endif
 #endif
 
 #ifdef NDEBUG
@@ -669,17 +770,10 @@ void MainApp::start()
 
     timer.start();
 
+    sendBridgesToThreads();
+    queueBridgeReconnectAllThreads(true);
+
     uint next_thread_index = 0;
-
-    {
-        for(std::shared_ptr<BridgeConfig> &bridge : this->bridges)
-        {
-            std::shared_ptr<ThreadData> &thread = threads[next_thread_index++ % threads.size()];
-            createBridge(thread, bridge);
-        }
-
-        queueBridgeReconnectAllThreads(true);
-    }
 
     this->bgWorker.start();
 
@@ -718,6 +812,57 @@ void MainApp::start()
                     socklen_t len = sizeof(struct sockaddr_in6);
                     memset(addr, 0, len);
                     int fd = check<std::runtime_error>(accept(cur_fd, addr, &len));
+
+                    /*
+                     * I decided to not use a delayed close mechanism. It has been observed that under overload and clients in a reconnect loop,
+                     * you can collect open files up to (a) million(s). By accepting and closing, the hope is we can keep clients at bay from
+                     * the thread loops well enough.
+                     */
+                    if (this->medianThreadDrift > settings.maxEventLoopDrift || this->drift.getDrift() > settings.maxEventLoopDrift)
+                    {
+                        const std::string addr_s = sockaddrToString(addr);
+                        bool do_close = false;
+
+                        if (settings.overloadMode == OverloadMode::CloseNewClients)
+                        {
+                            if (overloadLogCounter <= OVERLOAD_LOGS_MUTE_AFTER_LINES)
+                            {
+                                overloadLogCounter++;
+                                logger->log(LOG_ERROR) << "[OVERLOAD] FlashMQ seems to be overloaded while accepting new connection(s) from '"
+                                                       << addr_s << ". Closing socket. See 'overload_mode' and 'max_event_loop_drift'.";
+                            }
+                            do_close = true;
+                        }
+                        else if (settings.overloadMode == OverloadMode::Log)
+                        {
+                            if (overloadLogCounter <= OVERLOAD_LOGS_MUTE_AFTER_LINES)
+                            {
+                                overloadLogCounter++;
+                                logger->log(LOG_WARNING) << "[OVERLOAD] FlashMQ seems to be overloaded while accepting new connection(s) from '"
+                                                         << addr_s << ". See 'overload_mode' and 'max_event_loop_drift'.";
+                            }
+                        }
+                        else
+                        {
+                            throw std::runtime_error("Unimplemented OverloadMode");
+                        }
+
+                        if (overloadLogCounter > OVERLOAD_LOGS_MUTE_AFTER_LINES && overloadLogCounter < OVERLOAD_LOGS_MUTE_AFTER_LINES * 2)
+                        {
+                            overloadLogCounter = OVERLOAD_LOGS_MUTE_AFTER_LINES * 5;
+                            logger->log(LOG_WARNING) << "[OVERLOAD] Muting overload logging until it recovers, to avoid log spam and extra load.";
+                        }
+
+                        if (do_close)
+                        {
+                            close(fd);
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        overloadLogCounter = 0;
+                    }
 
                     SSL *clientSSL = nullptr;
                     if (listener->isSsl())
@@ -856,7 +1001,7 @@ void MainApp::start()
 
     this->bgWorker.waitForStop();
 
-    std::list<BridgeInfoForSerializing> bridgeInfos = BridgeInfoForSerializing::getBridgeInfosForSerializing(this->bridges);
+    std::list<BridgeInfoForSerializing> bridgeInfos = BridgeInfoForSerializing::getBridgeInfosForSerializing(this->bridgeConfigs);
     saveState(this->settings, bridgeInfos, false);
 }
 
@@ -964,20 +1109,55 @@ void MainApp::loadConfig(bool reload)
         }
     }
 
-    // We are not reloading bridges, because it's hard to figure out what to do. This does mean we need to
-    // validate the config of existing ones, because they may have their certificate paths changed.
-    if (this->bridges.empty())
     {
-        if (!reload)
-            loadBridgeInfo();
-    }
-    else
-    {
-        // Note that this checks the certificate paths of how the briges came from the config file, not the actual bridges. But, at least
-        // for now, they must be the same, because bridges aren't changed after they are created.
-        for (auto &bridge : this->bridges)
+        for (auto &pair : bridgeConfigs)
         {
-            bridge->isValid();
+            pair.second->queueForDelete = true;
+        }
+
+        std::list<std::shared_ptr<BridgeConfig>> bridges = loadBridgeInfo(this->settings);
+
+        for (std::shared_ptr<BridgeConfig> &bridge : bridges)
+        {
+            if (!bridge)
+                continue;
+
+            auto pos = this->bridgeConfigs.find(bridge->clientidPrefix);
+            if (pos != this->bridgeConfigs.end())
+            {
+                logger->log(LOG_NOTICE) << "Assing new config to bridge '" << bridge->clientidPrefix << "' and reconnect if needed.";
+
+                std::shared_ptr<BridgeConfig> &cur = pos->second;
+
+                if (!cur)
+                    continue;
+
+                std::shared_ptr<ThreadData> owner = cur->owner.lock();
+                std::string clientid = cur->getClientid();
+                cur = bridge;
+                cur->owner = owner;
+                cur->setClientId(cur->clientidPrefix, clientid);
+            }
+            else
+            {
+                logger->log(LOG_NOTICE) << "Adding bridge '" << bridge->clientidPrefix << "'.";
+                this->bridgeConfigs[bridge->clientidPrefix] = bridge;
+            }
+        }
+
+        for (auto &pair : bridgeConfigs)
+        {
+            if (pair.second->queueForDelete)
+            {
+                logger->log(LOG_NOTICE) << "Queueing bridge '" << pair.first << "' for removal, because it disappeared from config.";
+            }
+        }
+
+        // On first load, the start() function will take care of it.
+        if (reload)
+        {
+            sendBridgesToThreads();
+            queueBridgeReconnectAllThreads(false);
         }
     }
 

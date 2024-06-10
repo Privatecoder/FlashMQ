@@ -78,7 +78,7 @@ class Client
     bool disconnecting = false;
     bool outgoingConnection = false;
     bool outgoingConnectionEstablished = false;
-    bool bridge = false;
+    ClientType clientType = ClientType::Normal;
     bool supportsRetained = true; // Interestingly, only SERVERS can tell CLIENTS they don't support it (in CONNACK). The CONNECT packet has no field for it.
     std::string disconnectReason;
     std::chrono::time_point<std::chrono::steady_clock> lastActivity = std::chrono::steady_clock::now();
@@ -103,6 +103,7 @@ class Client
 
     uint16_t curOutgoingTopicAlias = 0;
     std::unordered_map<std::string, uint16_t> outgoingTopicAliases;
+    std::mutex outgoingTopicAliasMutex;
 
     std::string extendedAuthenticationMethod;
     std::unique_ptr<ConnAck> stagedConnack;
@@ -120,6 +121,8 @@ class Client
     void setAddr(const std::string &address);
 
 public:
+    uint8_t preAuthPacketCounter = 0;
+
     Client(int fd, std::shared_ptr<ThreadData> threadData, SSL *ssl, bool websocket, bool haproxy, struct sockaddr *addr, const Settings &settings, bool fuzzMode=false);
     Client(const Client &other) = delete;
     Client(Client &&other) = delete;
@@ -186,7 +189,7 @@ public:
     void resetBuffersIfEligible();
 
     void setTopicAlias(const uint16_t alias_id, const std::string &topic);
-    const std::string &getTopicAlias(const uint16_t id);
+    const std::string &getTopicAlias(const uint16_t id) const;
 
     uint32_t getMaxIncomingPacketSize() const;
     uint16_t getMaxIncomingTopicAliasValue() const;
@@ -213,8 +216,8 @@ public:
     std::shared_ptr<BridgeState> getBridgeState();
     void setBridgeConnected();
     bool getOutgoingConnectionEstablished() const;
-    bool isBridge() const { return bridge; }
-    void setBridge(bool val);
+    ClientType getClientType() const { return clientType; }
+    void setClientType(ClientType val);
     bool isRetainedAvailable() const {return supportsRetained; };
 
 #ifdef TESTING

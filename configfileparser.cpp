@@ -58,22 +58,30 @@ unsigned long full_stoul(const std::string &key, const std::string &value)
     return newVal;
 }
 
-void ConfigFileParser::testCorrectNumberOfValues(const std::string &key, size_t expected_values, const std::smatch &matches)
+void ConfigFileParser::testCorrectNumberOfValues(const std::string &key, size_t expected_values, const std::vector<std::string> &values)
 {
-    if (!matches.ready())
+    if (values.size() != expected_values)
     {
-        throw std::runtime_error("It appears the programmer made a mistake: please provide a ready() smatch object");
-    }
-    size_t encountered_values = matches.size() - 2; // 0 = full line, 1 = key, 2 = first value, 3 = second value etc.
-    if (encountered_values != expected_values)
-    {
-        const std::string &rest = matches[expected_values + 2];
-        if (!rest.empty())
+        std::ostringstream oss;
+        oss << "Option " << key << " expected " << expected_values << ", got " << values.size() << " arguments";
+
+        if (values.size() > expected_values)
         {
-            std::ostringstream oss;
-            oss << "Option " << key << " expected " << expected_values << ", got " << encountered_values << " arguments (" << rest << " ...)";
-            throw ConfigFileException(oss.str());
+            oss << ". Superflous ones: ";
+
+            for (size_t i = expected_values; i < values.size(); i++)
+            {
+                const std::string &rest = values.at(i);
+                oss << rest;
+
+                if (i + 1 >= values.size())
+                    oss << ".";
+                else
+                    oss << ", ";
+            }
         }
+
+        throw ConfigFileException(oss.str());
     }
 }
 
@@ -93,6 +101,15 @@ bool ConfigFileParser::testKeyValidity(const std::string &key, const std::string
     {
         std::ostringstream oss;
         oss << "Config key '" << key << "' is not valid (here).";
+
+        auto alternative = findCloseStringMatch(validKeys.begin(), validKeys.end(), key);
+
+        if (alternative != validKeys.end())
+        {
+            // The space before the question mark is to make copying using mouse-double-click possible.
+            oss << " Did you mean: " << *alternative << " ?";
+        }
+
         throw ConfigFileException(oss.str());
     }
 
@@ -196,6 +213,7 @@ ConfigFileParser::ConfigFileParser(const std::string &path) :
     validKeys.insert("retained_messages_mode");
     validKeys.insert("retained_messages_node_limit");
     validKeys.insert("expire_retained_messages_after_seconds");
+    validKeys.insert("retained_message_node_lifetime");
     validKeys.insert("expire_retained_messages_time_budget_ms");
     validKeys.insert("websocket_set_real_ip_from");
     validKeys.insert("shared_subscription_targeting");
@@ -208,6 +226,10 @@ ConfigFileParser::ConfigFileParser(const std::string &path) :
     validKeys.insert("minimum_wildcard_subscription_depth");
     validKeys.insert("wildcard_subscription_deny_mode");
     validKeys.insert("zero_byte_username_is_anonymous");
+    validKeys.insert("overload_mode");
+    validKeys.insert("max_event_loop_drift");
+    validKeys.insert("set_retained_message_defer_timeout");
+    validKeys.insert("set_retained_message_defer_timeout_spread");
 
     validListenKeys.insert("port");
     validListenKeys.insert("protocol");
@@ -221,6 +243,7 @@ ConfigFileParser::ConfigFileParser(const std::string &path) :
     validListenKeys.insert("client_verification_ca_dir");
     validListenKeys.insert("client_verification_still_do_authn");
     validListenKeys.insert("allow_anonymous");
+    validListenKeys.insert("tcp_nodelay");
 
     validBridgeKeys.insert("local_username");
     validBridgeKeys.insert("remote_username");
@@ -245,6 +268,7 @@ ConfigFileParser::ConfigFileParser(const std::string &path) :
     validBridgeKeys.insert("keepalive");
     validBridgeKeys.insert("max_outgoing_topic_aliases");
     validBridgeKeys.insert("max_incoming_topic_aliases");
+    validBridgeKeys.insert("tcp_nodelay");
 }
 
 std::list<std::string> ConfigFileParser::readFileRecursively(const std::string &path) const
@@ -372,6 +396,8 @@ void ConfigFileParser::loadFile(bool test)
     std::shared_ptr<BridgeConfig> curBridge;
     Settings tmpSettings;
 
+    const std::set<std::string> blockNames {"listen", "bridge"};
+
     // Then once we know the config file is valid, process it.
     for (std::string &line : lines)
     {
@@ -380,19 +406,29 @@ void ConfigFileParser::loadFile(bool test)
         if (std::regex_match(line, matches, block_regex_start))
         {
             const std::string &key = matches[1].str();
-            if (key == "listen")
+            if (testKeyValidity(key, "listen", blockNames))
             {
                 curParseLevel = ConfigParseLevel::Listen;
                 curListener = std::make_shared<Listener>();
             }
-            else if (key == "bridge")
+            else if (testKeyValidity(key, "bridge", blockNames))
             {
                 curParseLevel = ConfigParseLevel::Bridge;
                 curBridge = std::make_unique<BridgeConfig>();
             }
             else
             {
-                throw ConfigFileException(formatString("'%s' is not a valid block.", key.c_str()));
+                std::ostringstream oss;
+                oss << "'" << key << "' is not a valid block.";
+
+                auto alt = findCloseStringMatch(blockNames.begin(), blockNames.end(), key);
+
+                if (alt != blockNames.end())
+                {
+                    oss << " Did you mean: " << *alt << " ?";
+                }
+
+                throw ConfigFileException(oss.str());
             }
 
             continue;
@@ -419,7 +455,9 @@ void ConfigFileParser::loadFile(bool test)
         std::regex_match(line, matches, key_value_regex);
 
         std::string key = matches[1].str();
-        const std::string value = matches[2].str();
+        const std::string value_unparsed = matches[2].str();
+        const std::vector<std::string> values = parseValuesWithOptionalQuoting<ConfigFileException>(value_unparsed);
+        const std::string &value = values.at(0);
         size_t number_of_expected_values = 1; // Most lines only accept 1 argument, a select few 2.
         std::string valueTrimmed = value;
         trim(valueTrimmed);
@@ -492,8 +530,13 @@ void ConfigFileParser::loadFile(bool test)
                     bool val = stringTruthiness(value);
                     curListener->allowAnonymous = val ? AllowListenerAnonymous::Yes : AllowListenerAnonymous::No;
                 }
+                if (testKeyValidity(key, "tcp_nodelay", validListenKeys))
+                {
+                    bool val = stringTruthiness(value);
+                    curListener->tcpNoDelay = val;
+                }
 
-                testCorrectNumberOfValues(key, number_of_expected_values, matches);
+                testCorrectNumberOfValues(key, number_of_expected_values, values);
                 continue;
             }
             else if (curParseLevel == ConfigParseLevel::Bridge)
@@ -543,10 +586,10 @@ void ConfigFileParser::loadFile(bool test)
 
                     BridgeTopicPath topicPath;
 
-                    if (matches.size() == 4)
+                    if (values.size() >= 2)
                     {
                         number_of_expected_values = 2;
-                        const std::string &qosstr = matches[3];
+                        const std::string &qosstr = values.at(1);
 
                         if (!qosstr.empty())
                         {
@@ -567,10 +610,10 @@ void ConfigFileParser::loadFile(bool test)
 
                     BridgeTopicPath topicPath;
 
-                    if (matches.size() == 4)
+                    if (values.size() >= 2)
                     {
                         number_of_expected_values = 2;
-                        const std::string &qosstr = matches[3];
+                        const std::string &qosstr = values.at(1);
 
                         if (!qosstr.empty())
                         {
@@ -697,8 +740,12 @@ void ConfigFileParser::loadFile(bool test)
                 {
                     curBridge->remoteRetainAvailable = stringTruthiness(value);
                 }
+                if (testKeyValidity(key, "tcp_nodelay", validBridgeKeys))
+                {
+                    curBridge->tcpNoDelay = true;
+                }
 
-                testCorrectNumberOfValues(key, number_of_expected_values, matches);
+                testCorrectNumberOfValues(key, number_of_expected_values, values);
                 continue;
             }
 
@@ -950,6 +997,16 @@ void ConfigFileParser::loadFile(bool test)
                     tmpSettings.expireRetainedMessagesAfterSeconds = newVal;
                 }
 
+                if (testKeyValidity(key, "retained_message_node_lifetime", validKeys))
+                {
+                    const int val = full_stoi(key, value);
+
+                    if (val < 0)
+                        throw ConfigFileException("Option '" + key + "' must 0 or higher.");
+
+                    tmpSettings.retainedMessageNodeLifetime = std::chrono::seconds(val);
+                }
+
                 if (testKeyValidity(key, "expire_retained_messages_time_budget_ms", validKeys))
                 {
                     Logger::getInstance()->log(LOG_WARNING) << "The config option '" << key << "' is deprecated.";
@@ -1025,6 +1082,50 @@ void ConfigFileParser::loadFile(bool test)
                 {
                     tmpSettings.zeroByteUsernameIsAnonymous = stringTruthiness(value);
                 }
+
+                if (testKeyValidity(key, "overload_mode", validKeys))
+                {
+                    const std::string _val = str_tolower(value);
+
+                    if (_val == "log")
+                        tmpSettings.overloadMode = OverloadMode::Log;
+                    else if (_val == "close_new_clients")
+                        tmpSettings.overloadMode = OverloadMode::CloseNewClients;
+                    else
+                        throw ConfigFileException(formatString("Value '%s' for '%s' is invalid.", value.c_str(), key.c_str()));
+                }
+
+                if (testKeyValidity(key, "max_event_loop_drift", validKeys))
+                {
+                    const int val = full_stoi(key, value);
+
+                    if (val < 500)
+                    {
+                        throw ConfigFileException("Option '" + key + "' must be higher than 500 ms.");
+                    }
+
+                    tmpSettings.maxEventLoopDrift = std::chrono::milliseconds(val);
+                }
+
+                if (testKeyValidity(key, "set_retained_message_defer_timeout", validKeys))
+                {
+                    const int val = full_stoi(key, value);
+
+                    if (val < 0)
+                        throw ConfigFileException("Option '" + key + "' must 0 or higher.");
+
+                    tmpSettings.setRetainedMessageDeferTimeout = std::chrono::milliseconds(val);
+                }
+
+                if (testKeyValidity(key, "set_retained_message_defer_timeout_spread", validKeys))
+                {
+                    const int val = full_stoi(key, value);
+
+                    if (val < 0)
+                        throw ConfigFileException("Option '" + key + "' must 0 or higher.");
+
+                    tmpSettings.setRetainedMessageDeferTimeoutSpread = std::chrono::milliseconds(val);
+                }
             }
         }
         catch (std::invalid_argument &ex) // catch for the stoi()
@@ -1032,7 +1133,7 @@ void ConfigFileParser::loadFile(bool test)
             throw ConfigFileException(ex.what());
         }
 
-        testCorrectNumberOfValues(key, number_of_expected_values, matches);
+        testCorrectNumberOfValues(key, number_of_expected_values, values);
     }
 
     tmpSettings.checkUniqueBridgeNames();

@@ -127,58 +127,54 @@ PacketDropReason Session::writePacket(PublishCopyFactory &copyFactory, const uin
     const std::shared_ptr<Client> c = makeSharedClient();
 
     const uint8_t effectiveQos = copyFactory.getEffectiveQos(max_qos);
-    retainAsPublished = retainAsPublished || bridge;
+    retainAsPublished = retainAsPublished || clientType == ClientType::Mqtt3DefactoBridge;
     bool effectiveRetain = copyFactory.getEffectiveRetain(retainAsPublished);
 
     if (c && !c->isRetainedAvailable())
         effectiveRetain = false;
 
     const Settings *settings = ThreadGlobals::getSettings();
+    Authentication *auth = ThreadGlobals::getAuth();
+    assert(auth);
 
-    Authentication *_auth = ThreadGlobals::getAuth();
-    assert(_auth);
-    Authentication &auth = *_auth;
-
-    const AuthResult aclResult = auth.aclCheck(client_id, username, copyFactory.getTopic(), copyFactory.getSubtopics(), copyFactory.getPayload(), AclAccess::read,
-                                               effectiveQos, effectiveRetain, copyFactory.getUserProperties());
+    const AuthResult aclResult = auth->aclCheck(client_id, username, copyFactory.getTopic(), copyFactory.getSubtopics(), copyFactory.getPayload(), AclAccess::read,
+                                                effectiveQos, effectiveRetain, copyFactory.getUserProperties());
 
     if (aclResult != AuthResult::success)
     {
         return PacketDropReason::AuthDenied;
     }
 
-    if (effectiveQos == 0)
-    {
-        if (c)
-            return c->writeMqttPacketAndBlameThisClient(copyFactory, effectiveQos, 0, effectiveRetain);
-        return PacketDropReason::ClientOffline;
-    }
+    uint16_t pack_id = 0;
 
-    std::unique_lock<std::mutex> locker(qosQueueMutex);
-
-    // We don't clear expired messages for online clients. It would slow down the 'happy flow' and those packets are already in the output
-    // buffer, so we can't clear them anyway.
-    if (!c)
+    if (__builtin_expect(effectiveQos > 0, 0))
     {
-        clearExpiredMessagesFromQueue();
-    }
+        std::unique_lock<std::mutex> locker(qosQueueMutex);
 
-    if (this->flowControlQuota <= 0 || (qosPacketQueue.getByteSize() >= settings->maxQosBytesPendingPerClient && qosPacketQueue.size() > 0))
-    {
-        if (QoSLogPrintedAtId != nextPacketId)
+        // We don't clear expired messages for online clients. It would slow down the 'happy flow' and those packets are already in the output
+        // buffer, so we can't clear them anyway.
+        if (!c)
         {
-            logger->logf(LOG_WARNING, "Dropping QoS message(s) for client '%s', because it hasn't seen enough PUBACK/PUBCOMP/PUBRECs to release places "
-                                      "or it exceeded the queue size. You could increase 'max_qos_msg_pending_per_client' "
-                                      "or 'max_qos_bytes_pending_per_client' (but this is also subject the client's 'receive max').", client_id.c_str());
-            QoSLogPrintedAtId = nextPacketId;
+            clearExpiredMessagesFromQueue();
         }
-        return PacketDropReason::QoSTODOSomethingSomething;
+
+        if (this->flowControlQuota <= 0 || (qosPacketQueue.getByteSize() >= settings->maxQosBytesPendingPerClient && qosPacketQueue.size() > 0))
+        {
+            if (QoSLogPrintedAtId != nextPacketId)
+            {
+                logger->logf(LOG_WARNING, "Dropping QoS message(s) for client '%s', because it hasn't seen enough PUBACK/PUBCOMP/PUBRECs to release places "
+                                          "or it exceeded the queue size. You could increase 'max_qos_msg_pending_per_client' "
+                                          "or 'max_qos_bytes_pending_per_client' (but this is also subject the client's 'receive max').", client_id.c_str());
+                QoSLogPrintedAtId = nextPacketId;
+            }
+            return PacketDropReason::QoSTODOSomethingSomething;
+        }
+
+        pack_id = getNextPacketId();
+
+        if (requiresQoSQueueing())
+            qosPacketQueue.queuePublish(copyFactory, pack_id, effectiveQos, effectiveRetain);
     }
-
-    const uint16_t pack_id = getNextPacketId();
-
-    if (requiresQoSQueueing())
-        qosPacketQueue.queuePublish(copyFactory, pack_id, effectiveQos, effectiveRetain);
 
     PacketDropReason return_value = PacketDropReason::ClientOffline;
 
@@ -241,44 +237,55 @@ void Session::sendAllPendingQosData()
     std::shared_ptr<Client> c = makeSharedClient();
     if (c)
     {
-        std::lock_guard<std::mutex> locker(qosQueueMutex);
+        std::vector<std::shared_ptr<QueuedPublish>> copiedPublishes;
+        std::vector<uint16_t> copiedQoS2Ids;
 
-        std::shared_ptr<QueuedPublish> qp_ = qosPacketQueue.getTail();;
-        while (qp_)
         {
-            std::shared_ptr<QueuedPublish> qp = qp_;
-            qp_ = qp_->next;
+            std::lock_guard<std::mutex> locker(qosQueueMutex);
 
-            QueuedPublish &queuedPublish = *qp;
-            Publish &pub = queuedPublish.getPublish();
-
-            if (pub.hasExpired() || (authentication.aclCheck(pub, pub.payload) != AuthResult::success))
+            std::shared_ptr<QueuedPublish> qp_ = qosPacketQueue.getTail();;
+            while (qp_)
             {
-                qosPacketQueue.erase(qp->getPacketId());
-                continue;
+                std::shared_ptr<QueuedPublish> qp = qp_;
+                qp_ = qp_->next;
+
+                Publish &pub = qp->getPublish();
+
+                if (pub.hasExpired() || (authentication.aclCheck(pub, pub.payload) != AuthResult::success))
+                {
+                    qosPacketQueue.erase(qp->getPacketId());
+                    continue;
+                }
+
+                if (flowControlQuota <= 0)
+                {
+                    logger->logf(LOG_WARNING, "Dropping QoS message(s) for client '%s', because it exceeds its receive maximum.", client_id.c_str());
+                    qosPacketQueue.erase(qp->getPacketId());
+                    continue;
+                }
+
+                flowControlQuota--;
+
+                copiedPublishes.push_back(qp);
             }
 
-            if (flowControlQuota <= 0)
+            for (const uint16_t packet_id : outgoingQoS2MessageIds)
             {
-                logger->logf(LOG_WARNING, "Dropping QoS message(s) for client '%s', because it exceeds its receive maximum.", client_id.c_str());
-                qosPacketQueue.erase(qp->getPacketId());
-                continue;
+                copiedQoS2Ids.push_back(packet_id);
             }
-
-            flowControlQuota--;
-
-            MqttPacket p(c->getProtocolVersion(), pub);
-            p.setPacketId(queuedPublish.getPacketId());
-            if (!c->isRetainedAvailable())
-                p.setRetain(false);
-            //p.setDuplicate(); // TODO: this is wrong. Until we have a retransmission system, no packets can have the DUP bit set.
-
-            c->writeMqttPacketAndBlameThisClient(p);
         }
 
-        for (const uint16_t packet_id : outgoingQoS2MessageIds)
+        for(std::shared_ptr<QueuedPublish> &qp : copiedPublishes)
         {
-            PubResponse pubRel(c->getProtocolVersion(), PacketType::PUBREL, ReasonCodes::Success, packet_id);
+            Publish &pub = qp->getPublish();
+            PublishCopyFactory fac(&pub);
+            const bool retain = !c->isRetainedAvailable() ? false : pub.retain;
+            c->writeMqttPacketAndBlameThisClient(fac, pub.qos, qp->getPacketId(), retain);
+        }
+
+        for(uint16_t id : copiedQoS2Ids)
+        {
+            PubResponse pubRel(c->getProtocolVersion(), PacketType::PUBREL, ReasonCodes::Success, id);
             MqttPacket packet(pubRel);
             c->writeMqttPacketAndBlameThisClient(packet);
         }
@@ -305,9 +312,9 @@ void Session::setWill(WillPublish &&pub)
     this->willPublish = std::make_shared<WillPublish>(std::move(pub));
 }
 
-void Session::setBridge(bool val)
+void Session::setClientType(ClientType val)
 {
-    this->bridge = val;
+    this->clientType = val;
 }
 
 void Session::addIncomingQoS2MessageId(uint16_t packet_id)

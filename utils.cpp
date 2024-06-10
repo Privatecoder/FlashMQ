@@ -295,7 +295,17 @@ std::string &rtrim(std::string &s, unsigned char c)
 
 bool startsWith(const std::string &s, const std::string &needle)
 {
-    return s.find(needle) == 0;
+    if (s.length() < needle.length())
+        return false;
+
+    size_t i;
+    for (i = 0; i < needle.length(); i++)
+    {
+        if (s[i] != needle[i])
+            return false;
+    }
+
+    return i == needle.length();
 }
 
 std::string getSecureRandomString(const ssize_t len)
@@ -714,6 +724,90 @@ std::string protocolVersionString(ProtocolVersion p)
     }
 }
 
+/**
+ * @brief Returns the edit distance between the two given strings
+ *
+ * This function uses the Wagner–Fischer algorithm to calculate the Levenshtein
+ * distance between two strings: the total number of insertions, swaps, and
+ * deletions that are needed to transform the one into the other.
+ */
+unsigned int distanceBetweenStrings(const std::string &stringA, const std::string &stringB)
+{
+    // The matrix contains the distances between the substrings.
+    // You can find a description of the algorithm online.
+    //
+    // Roughly:
+    //
+    // line_a: "dog"
+    // line_b: "horse"
+    //
+    //   -->
+    //  |   | # | d | o | g
+    //  V --+---+---+---+---+---+---+---
+    //    # | P
+    //    h |
+    //    o |
+    //    r | Q   X       Y
+    //    s |
+    //    e |             Z
+    //
+    // P = [0, 0] = the distance from ""    to ""       (which is 0)
+    // Q = [0, 3] = the distance from ""    to "hor"    (which is 3, all inserts)
+    // X = [1, 3] = the distance from "d"   to "hor"    (which is 3, 1 swap and 2 inserts)
+    // Y = [3, 3] = the distance from "dog" to "hor"    (which is 2, both swaps)
+    // Z = [3, 5] = the distance from "dog" to "horse"  (which is 4, two swaps and 2 inserts)
+    //
+    // The matrix does not have to be square, the dimensions depends on the inputs
+    //
+    // the position within stringA should always be referred to as x
+    // the position within stringB should always be referred to as y
+
+    using mymatrix = std::vector<std::vector<int>>;
+    // +1 because we also need to store the length from the empty strings
+    int width = stringA.size() + 1;
+    int height = stringB.size() + 1;
+    mymatrix distances(width, std::vector<int>(height));
+
+    // We know that the distance from the substrings of line_a to ""
+    // is equal to the length of the substring of line_a
+    for (int x = 0; x < width; x++)
+    {
+        distances.at(x).at(0) = x;
+    }
+
+    // We know that the distance from "" to the substrings of line_b
+    // is equal to the length of the substring of line_b
+    for (int y = 0; y < height; y++)
+    {
+        distances.at(0).at(y) = y;
+    }
+
+    // Now all we do is to fill out the rest of the matrix, easy peasy
+    // note we start at 1 because the top row and left column have already been calculated
+    for (int x = 1; x < width; x++)
+    {
+        for (int y = 1; y < height; y++)
+        {
+            if (stringA.at(x - 1) == stringB.at(y - 1))
+            {
+                // the letters in both words are the same: we can travel from the top-left for free to the current state
+                distances.at(x).at(y) = distances.at(x - 1).at(y - 1);
+            }
+            else
+            {
+                // let's calculate the different costs and pick the cheapest option
+                // We use "+1" for all costs since they are all equally likely in our case
+                int dinstance_with_deletion = distances.at(x).at(y - 1) + 1;
+                int dinstance_with_insertion = distances.at(x - 1).at(y) + 1;
+                int dinstance_with_substitution = distances.at(x - 1).at(y - 1) + 1;
+                distances.at(x).at(y) = std::min({dinstance_with_deletion, dinstance_with_insertion, dinstance_with_substitution});
+            }
+        }
+    }
+
+    return distances.at(width - 1).at(height - 1); // the last cell contains our answer
+}
+
 uint32_t ageFromTimePoint(const std::chrono::time_point<std::chrono::steady_clock> &point)
 {
     auto duration = std::chrono::steady_clock::now() - point;
@@ -996,6 +1090,74 @@ std::string packetTypeToString(PacketType ptype)
 }
 
 
+std::string propertyToString(Mqtt5Properties p)
+{
+    switch (p)
+    {
+    case (Mqtt5Properties::None):
+        return "None";
+    case (Mqtt5Properties::PayloadFormatIndicator):
+        return "PayloadFormatIndicator";
+    case (Mqtt5Properties::MessageExpiryInterval):
+        return "MessageExpiryInterval";
+    case (Mqtt5Properties::ContentType):
+        return "ContentType";
+    case (Mqtt5Properties::ResponseTopic):
+        return "ResponseTopic";
+    case (Mqtt5Properties::CorrelationData):
+        return "CorrelationData";
+    case (Mqtt5Properties::SubscriptionIdentifier):
+        return "SubscriptionIdentifier";
+    case (Mqtt5Properties::SessionExpiryInterval):
+        return "SessionExpiryInterval";
+    case (Mqtt5Properties::AssignedClientIdentifier):
+        return "AssignedClientIdentifier";
+    case (Mqtt5Properties::ServerKeepAlive):
+        return "ServerKeepAlive";
+    case (Mqtt5Properties::AuthenticationMethod):
+        return "AuthenticationMethod";
+    case (Mqtt5Properties::AuthenticationData):
+        return "AuthenticationData";
+    case (Mqtt5Properties::RequestProblemInformation):
+        return "RequestProblemInformation";
+    case (Mqtt5Properties::WillDelayInterval):
+        return "WillDelayInterval";
+    case (Mqtt5Properties::RequestResponseInformation):
+        return "RequestResponseInformation";
+    case (Mqtt5Properties::ResponseInformation):
+        return "ResponseInformation";
+    case (Mqtt5Properties::ServerReference):
+        return "ServerReference";
+    case (Mqtt5Properties::ReasonString):
+        return "ReasonString";
+    case (Mqtt5Properties::ReceiveMaximum):
+        return "ReceiveMaximum";
+    case (Mqtt5Properties::TopicAliasMaximum):
+        return "TopicAliasMaximum";
+    case (Mqtt5Properties::TopicAlias):
+        return "TopicAlias";
+    case (Mqtt5Properties::MaximumQoS):
+        return "MaximumQoS";
+    case (Mqtt5Properties::RetainAvailable):
+        return "RetainAvailable";
+    case (Mqtt5Properties::UserProperty):
+        return "UserProperty";
+    case (Mqtt5Properties::MaximumPacketSize):
+        return "MaximumPacketSize";
+    case (Mqtt5Properties::WildcardSubscriptionAvailable):
+        return "WildcardSubscriptionAvailable";
+    case (Mqtt5Properties::SubscriptionIdentifierAvailable):
+        return "SubscriptionIdentifierAvailable";
+    case (Mqtt5Properties::SharedSubscriptionAvailable):
+        return "SharedSubscriptionAvailable";
+    default:
+        break;
+    }
+
+    std::ostringstream oss;
+    oss << static_cast<int>(p);
+    return oss.str();
+}
 
 
 

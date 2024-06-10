@@ -1,10 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <refentry
-    xml:id="flashmq.conf"
+    xml:id="flashmq.conf.5"
     xml:lang="en"
     xmlns="http://docbook.org/ns/docbook"
-    version="5.0"
-    xmlns:xlink="http://www.w3.org/1999/xlink">
+    version="5.2"
+    xmlns:xlink="http://www.w3.org/1999/xlink"
+    xmlns:xi="http://www.w3.org/2001/XInclude">
+
+  <info>
+    <biblioid class="uri">https://www.flashmq.org/man/flashmq.conf.5</biblioid>
+  </info>
 
   <refmeta>
     <refentrytitle>flashmq.conf</refentrytitle>
@@ -18,23 +23,40 @@
 
   <refsynopsisdiv xml:id="synopsis">
     <para>
-      The <filename>flashmq.conf</filename> file is the configuration used for configuring the FlashMQ MQTT broker. It doesn't necessarily have to be called <filename>flashmq.conf</filename>; the <command>flashmq</command> daemon program sports a <option>--config-file</option> parameter.
+       The <filename>flashmq.conf</filename> file is the configuration used for configuring the FlashMQ MQTT broker.
     </para>
   </refsynopsisdiv>
+
+  <refsect1 xml:id="config-location">
+    <title>Config location</title>
+    <para>
+      By default, the <command>flashmq</command> daemon expects to find its configuration file at <filename>/etc/flashmq/flashmq.conf</filename>, but this can be overriden using the <option>--config-file</option> command-line argument; see the <citerefentry><refentrytitle>flashmq</refentrytitle><manvolnum>1</manvolnum></citerefentry> man page for details.
+    </para>
+    <para>
+      Using the <link xlink:href="#include_dir"><option>include_dir</option></link> parameter in your config file, you can load all the <filename>*.conf</filename> files from that given directory.
+    </para>
+  </refsect1>
 
   <refsect1 xml:id="file-format">
     <title>File format</title>
     <para>
-      To set a parameter, its name must appear on a single line, followed by whitespace, followed by the parameter value.
+      To set a parameter, its name must appear on a single line, followed by one or more potentially quoted arguments.
+    </para>
+
+    <literallayout language="flashmq.conf" class="monospaced"><![CDATA[parameter-name1 parameter-value
+parameter-name2 'value with spaces'
+parameter-name3 "escaped \" quote"
+multi-value-param one 'two' "three" "with ' char"
+      ]]></literallayout>
+
+    <para>
+      Quoted values are the same as unquoted values when they don't need it. They are necessary for when argument values have spaces, for instance.
     </para>
     <para>
-      <option>parameter-name</option> <replaceable>parameter-value</replaceable>
+      When setting boolean values, <literal>yes</literal>/<literal>no</literal>, <literal>true</literal>/<literal>false</literal> and <literal>on</literal>/<literal>off</literal> can all be used.
     </para>
     <para>
-      When setting boolean values, <literal>yes/no</literal>, <literal>true/false</literal> and <literal>on/off</literal> can all be used.
-    </para>
-    <para>
-      To configure the listeners, use <option>listen</option> blocks, defined by { and }. See EXAMPLE LISTENERS for details.
+      To configure the listeners, use <option>listen</option> blocks, defined by <literal>{</literal> and <literal>}</literal>. See <link xlink:href="#example_listeners">EXAMPLE LISTENERS</link> for details.
     </para>
     <para>
       Lines beginning with the hash character (“<literal>#</literal>”) and empty lines are ignored. Thus, a line can be commented out by prepending a “<literal>#</literal>” to it.
@@ -45,7 +67,7 @@
     <title>Global parameters</title>
     <variablelist>
       <varlistentry xml:id="plugin">
-        <term><option>plugin</option> <replaceable>/path/to/plugin.so</replaceable></term>
+        <term><option>plugin</option> <filename>/path/to/plugin.so</filename></term>
         <listitem>
           <para>
             FlashMQ supports an ELF shared object (<filename>.so</filename> file) plugin interface to add functionality, authorization and authentication, because it’s hard to provide a declarative mechanism that works for everybody. See <filename>flashmq_plugin.h</filename> for the API and its documentation. It’s written in C++ for ease of passing FlashMQ internals without conversion to C, but you can basically just use a C++ compiler and program like it was C; the C++ constructs are simple.
@@ -111,7 +133,7 @@
         </listitem>
       </varlistentry>
       <varlistentry xml:id="log_file">
-        <term><option>log_file</option> <replaceable>/path/to/flashmq.log</replaceable></term>
+        <term><option>log_file</option> <filename>/path/to/flashmq.log</filename></term>
         <listitem>
           <para>
             This configuration parameter sets the path to FlashMQ's log file. If you omit the, the output will go to stdout.
@@ -228,7 +250,7 @@
         </listitem>
       </varlistentry>
       <varlistentry xml:id="mosquitto_password_file">
-        <term><option>mosquitto_password_file</option> <replaceable>/foo/bar/mosquitto_password_file</replaceable></term>
+        <term><option>mosquitto_password_file</option> <filename>/foo/bar/mosquitto_password_file</filename></term>
         <listitem>
           <para>
             File with usernames and hashed+salted passwords as generated by Mosquitto's <command>mosquitto_passwd</command>.
@@ -239,7 +261,7 @@
         </listitem>
       </varlistentry>
       <varlistentry xml:id="mosquitto_acl_file">
-        <term><option>mosquitto_acl_file</option> <replaceable>/foo/bar/mosquitto_acl_file</replaceable></term>
+        <term><option>mosquitto_acl_file</option> <filename>/foo/bar/mosquitto_acl_file</filename></term>
         <listitem>
           <para>
             ACL (access control lists) for users, anonymous users and patterns expandable with %u (username) and %c (clientid). Format is Mosquitto's acl_file.
@@ -317,7 +339,7 @@
         </listitem>
       </varlistentry>
       <varlistentry xml:id="storage_dir">
-        <term><option>storage_dir</option> <replaceable>/path/to/dir</replaceable></term>
+        <term><option>storage_dir</option> <filename>/path/to/dir</filename></term>
         <listitem>
           <para>
             Location to store sessions, subscriptions and retained messages.
@@ -455,6 +477,57 @@
         </listitem>
       </varlistentry>
 
+      <varlistentry xml:id="set_retained_message_defer_timeout">
+        <term><option>set_retained_message_defer_timeout</option> <replaceable>milliseconds</replaceable></term>
+        <listitem>
+          <para>
+            The time after which FlashMQ will fall back to (b)locking vs queued mode for setting retained messages. 0, the default, disables queued mode altogether. It's disabled by default because it can incur some extra CPU and memory overhead.
+          </para>
+          <para>
+            Each retained message lives in a node in a tree. The topic 'one/two/three' is three nodes. When a node in that tree does not exist yet, it needs to be created. This requires a write lock on the tree. At this point, other threads reading from or writing to the retained message tree need to wait. This can cause a compounding blocking effect, especially if many threads do it at once. 
+          </para>
+          <para>
+            This feature is to favor server responsiveness vs the speed at which retained messages become available in the server. It is primarily useful for when you have a lot of retained messages on different/changing topics. If at first a retained message can't be set, the action to do so will be retried in the event loop, asynchronously.
+          </para>
+          <para>
+            This setting determines the maximum amount of time to defer setting a retained message, after which it will fall back to using locks.
+          </para>
+          <para>
+            Also see <option>set_retained_message_defer_timeout_spread</option>
+          </para>
+          <para>
+            Default value: <filename>0</filename>
+          </para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry xml:id="set_retained_message_defer_timeout_spread">
+        <term><option>set_retained_message_defer_timeout_spread</option> <replaceable>milliseconds</replaceable></term>
+        <listitem>
+          <para>
+            For <option>set_retained_message_defer_timeout</option>, the amount of random spread between 0 and this value for the timeout. This spreads out locking over time, reducing contention.
+          </para>
+          <para>
+            Default value: <filename>1000</filename>
+          </para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry xml:id="retained_message_node_lifetime">
+        <term><option>retained_message_node_lifetime</option> <replaceable>seconds</replaceable></term>
+        <listitem>
+          <para>
+            The grace period after which a retained message node is eligible for deletion. The topic 'one/two/three' is three nodes, and if that topic had a message, it would be contained in 'three'.
+          </para>
+          <para>
+            FlashMQ will periodically clear out retained message nodes that have no message anymore. This is required to save memory. But, when you receive retained messages on the same topics repeatedly, it may be beneficial to keep the nodes around, to avoid the need for locks to recreate them. If you know that retained messages come and go within a certain period, it's benificial to set this value so that no unnecessary node destruction and creation takes place.
+          </para>
+          <para>
+            Default value: <filename>0</filename>
+          </para>
+        </listitem>
+      </varlistentry>
+
       <varlistentry xml:id="websocket_set_real_ip_from">
         <term><option>websocket_set_real_ip_from</option> <replaceable>inet4_address/inet6_address</replaceable></term>
         <listitem>
@@ -514,6 +587,42 @@
           </para>
           <para>
             Default: <literal>deny_all</literal>
+          </para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry xml:id="overload_mode">
+        <term><option>overload_mode</option> <replaceable>log/close_new_clients</replaceable></term>
+        <listitem>
+          <para>
+            Define the action to perform when the value defined with <option>max_event_loop_drift</option> is exceeded.
+          </para>
+          <para>
+            When a server is (re)started, and hundreds of thousands of clients connect, the SSL handshaking and authenticating can be so heavy that it doesn't get to clients in time. They will then reconnect and try again, and get stuck in a loop. This option is to mitigate that. With <literal>close_new_clients</literal>, new clients will be closed immediately after connecting while the server is overloaded. This will allow the worker threads to process the new clients in a controlled manner.
+          </para>
+          <para>
+              For really large deployments, this can be augmented with extra rate limiting in iptables, or other firewalls. A stateless method is preferred, like: <literal>iptables -I INPUT -p tcp -m multiport --dports 8883,1883 --syn -m hashlimit --hashlimit-name newmqttconns --hashlimit-above 10000/second --hashlimit-burst 15000 -j DROP</literal>
+          </para>
+          <para>
+            The current default is <literal>log</literal>, but that will likely change in the future.
+          </para>
+          <para>
+            Default: <literal>log</literal>
+          </para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry xml:id="max_event_loop_drift">
+        <term><option>max_event_loop_drift</option> <replaceable>milliseconds</replaceable></term>
+        <listitem>
+          <para>
+            For <option>overload_mode</option>, the maximum permissible thread drift before the overload action is taken.
+          </para>
+          <para>
+            The drift values considered are those of the main loop, in which clients are accepted, and the median of all worker threads.
+          </para>
+          <para>
+            Default: <literal>2000</literal>
           </para>
         </listitem>
       </varlistentry>
@@ -702,13 +811,31 @@
           </para>
         </listitem>
       </varlistentry>
+
+      <varlistentry xml:id="tcp_nodelay">
+        <term><option>tcp_nodelay</option> <replaceable>true/false</replaceable></term>
+        <listitem>
+          <para>
+            <option>tcp_nodelay</option> will cause the <literal>TCP_NODELAY</literal> option to be set for the listener's socket(s), and therefore for all clients accepted on that listener.
+          </para>
+          <para>
+            <literal>TCP_NODELAY</literal> is a OS TCP-layer option that will cause messages written by FlashMQ to the socket to be flushed immediately, without letting Nagle's algorithm (the default) collect small outgoing TCP packets into bigger packets.
+          </para>
+          <para>
+            Foregoing Nagle's algorithm by setting <option>tcp_nodelay</option> to <replaceable>true</replaceable>&#xa0;<emphasis>may</emphasis> decrease latency, at the likely cost of some network efficiency.
+          </para>
+          <para>
+            Default: <replaceable>false</replaceable>
+          </para>
+        </listitem>
+      </varlistentry>
     </variablelist>
   </refsect1>
 
-  <refsect1 xml:id="example_config">
+  <refsect1 xml:id="example_listeners">
     <title>Example listeners</title>
 
-    <literallayout class="monospaced"><![CDATA[listen {
+    <literallayout language="flashmq.conf" class="monospaced"><![CDATA[listen {
   protocol mqtt
   inet_protocol ip4_ip6
   inet4_bind_address 127.0.0.1
@@ -757,6 +884,10 @@ listen {
     <title>Bridge configuration</title>
     <para>
        Bridges can be defined inside <literal>bridge { }</literal> blocks. A bridge is essentially just an outgoing connection to another server with loop-detection and retain flag relaying. It is not a form of clustering. Also note that one bridge is one connection, and because FlashMQ's threading model is that clients are serviced by one selected thread only, a bridge has the potential to saturate a thread, if it's heavily loaded. You could work around that by defining multiple bridges to the same server, for various topic paths. A future version of FlashMQ will likely improve upon this.
+    </para>
+
+    <para>
+      Bridges are dynamically created, removed or changed upon config reload. When a bridge configuration changes, it will disconnect and reconnect.
     </para>
 
     <variablelist>
@@ -854,7 +985,7 @@ listen {
         <term><option>clientid_prefix</option> <replaceable>prefix</replaceable></term>
         <listitem>
           <para>
-            The prefix of the randomly generated client ID. Client IDs cannot be explicitely set for security reasons. See <link xlink:href="https://www.flashmq.org/2022/11/26/understanding-clean-session-and-clean-start/">Understanding clean session and clean start</link>.
+            The prefix of the randomly generated client ID. Client IDs cannot be explicitely set for security reasons. See <link xlink:href="https://www.flashmq.org/2022/11/26/understanding-clean-session-and-clean-start/"><citetitle pubwork="webpage">Understanding clean session and clean start</citetitle></link>.
           </para>
           <para>
             Default: <literal>fmqbridge</literal>
@@ -1036,13 +1167,28 @@ listen {
         </listitem>
       </varlistentry>
 
+      <varlistentry xml:id="bridge__tcp_nodelay">
+        <term><option>tcp_nodelay</option> <replaceable>true/false</replaceable></term>
+        <listitem>
+          <para>
+            <option>tcp_nodelay</option> will cause the <literal>TCP_NODELAY</literal> option to be set for the client socket that is used to connect to the other end of the bridge.
+          </para>
+          <para>
+            See the documentation for the <link xlink:href="#tcp_nodelay"><option>tcp_nodelay</option></link> <emphasis>listener</emphasis> parameter for further elaboration.
+          </para>
+          <para>
+            Default: <replaceable>false</replaceable>
+          </para>
+        </listitem>
+      </varlistentry>
+
     </variablelist>
   </refsect1>
 
   <refsect1 xml:id="example_bridge">
     <title>Example bridge</title>
 
-    <literallayout class="monospaced"><![CDATA[bridge {
+    <literallayout language="flashmq.conf" class="monospaced"><![CDATA[bridge {
     address demo.flashmq.org
     publish send/this
     subscribe receive/this
@@ -1076,8 +1222,10 @@ listen {
       </simplelist>
     </para>
     <para>
-      <link xlink:href="https://www.flashmq.org/">www.flashmq.org</link>
+      <link xlink:href="https://www.flashmq.org/">https://www.flashmq.org/</link>
     </para>
   </refsect1>
+
+  <xi:include href="refentry.colophon.dbk5"/>
 </refentry>
 <!-- vim: set expandtab ft=xml shiftwidth=2 tabstop=2: -->

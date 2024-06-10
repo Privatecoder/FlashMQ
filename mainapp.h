@@ -31,11 +31,13 @@ See LICENSE for license details.
 #include "oneinstancelock.h"
 #include "bridgeinfodb.h"
 #include "backgroundworker.h"
+#include "driftcounter.h"
 
 class MainApp
 {
 #ifdef TESTING
     friend class MainAppInThread;
+    friend class MainAppAsFork;
 #endif
 
     static MainApp *instance;
@@ -56,12 +58,16 @@ class MainApp
     std::mutex eventMutex;
     Timer timer;
 
+    uint overloadLogCounter = 0;
+    DriftCounter drift;
+    std::chrono::milliseconds medianThreadDrift = std::chrono::milliseconds(0);
+
     Settings settings;
 
     std::list<std::shared_ptr<Listener>> listeners;
     std::unordered_map<int, ScopedSocket> activeListenSockets;
 
-    std::list<std::shared_ptr<BridgeConfig>> bridges;
+    std::unordered_map<std::string, std::shared_ptr<BridgeConfig>> bridgeConfigs;
     std::mutex quitMutex;
     std::string fuzzFilePath;
     OneInstanceLock oneInstanceLock;
@@ -86,15 +92,17 @@ class MainApp
     void queuePublishStatsOnDollarTopic();
     static void saveState(const Settings &settings, const std::list<BridgeInfoForSerializing> &bridgeInfos, bool sleep_after_limit);
     static void saveBridgeInfo(const std::string &filePath, const std::list<BridgeInfoForSerializing> &bridgeInfos);
-    void loadBridgeInfo();
+    static std::list<std::shared_ptr<BridgeConfig>> loadBridgeInfo(Settings &settings);
     void saveStateInThread();
     void queueSaveStateInThread();
     void queueSendQueuedWills();
     void waitForWillsQueued();
     void waitForDisconnectsInitiated();
     void queueRetainedMessageExpiration();
-    void createBridge(std::shared_ptr<ThreadData> &thread, const std::shared_ptr<BridgeConfig> &bridgeConfig);
+    void sendBridgesToThreads();
+    void queueSendBridgesToThreads();
     void queueBridgeReconnectAllThreads(bool alsoQueueNexts);
+    void queueInternalHeartbeat();
 
     MainApp(const std::string &configFilePath);
 public:

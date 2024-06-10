@@ -22,6 +22,8 @@ See LICENSE for license details.
 #include "bridgeconfig.h"
 
 #define ABSOLUTE_MAX_PACKET_SIZE 268435455
+#define HEARTBEAT_INTERVAL 1000
+#define OVERLOAD_LOGS_MUTE_AFTER_LINES 5000
 
 enum class RetainedMessagesMode
 {
@@ -41,6 +43,12 @@ enum class WildcardSubscriptionDenyMode
 {
     DenyAll,
     DenyRetainedOnly
+};
+
+enum class OverloadMode
+{
+    Log,
+    CloseNewClients
 };
 
 class Settings
@@ -90,11 +98,16 @@ public:
     bool willsEnabled = true;
     uint32_t retainedMessagesDeliveryLimit = 2048;
     uint32_t retainedMessagesNodeLimit = std::numeric_limits<uint32_t>::max();
+    std::chrono::seconds retainedMessageNodeLifetime = std::chrono::seconds(0);
     RetainedMessagesMode retainedMessagesMode = RetainedMessagesMode::Enabled;
     SharedSubscriptionTargeting sharedSubscriptionTargeting = SharedSubscriptionTargeting::RoundRobin;
     uint16_t minimumWildcardSubscriptionDepth = 0;
     WildcardSubscriptionDenyMode wildcardSubscriptionDenyMode = WildcardSubscriptionDenyMode::DenyAll;
     bool zeroByteUsernameIsAnonymous = false;
+    std::chrono::milliseconds maxEventLoopDrift = std::chrono::milliseconds(2000);
+    OverloadMode overloadMode = OverloadMode::Log;
+    std::chrono::milliseconds setRetainedMessageDeferTimeout = std::chrono::milliseconds(0);
+    std::chrono::milliseconds setRetainedMessageDeferTimeoutSpread = std::chrono::milliseconds(1000);
     std::list<std::shared_ptr<Listener>> listeners; // Default one is created later, when none are defined.
 
     std::list<Network> setRealIpFrom;

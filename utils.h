@@ -25,6 +25,7 @@ See LICENSE for license details.
 #include <sys/stat.h>
 #include <sys/random.h>
 #include <stdexcept>
+#include <cassert>
 
 #include "cirbuf.h"
 #include "bindaddr.h"
@@ -124,6 +125,34 @@ std::string websocketCloseCodeToString(uint16_t code);
 
 std::string protocolVersionString(ProtocolVersion p);
 
+unsigned int distanceBetweenStrings(const std::string &stringA, const std::string &stringB);
+
+template<typename it>
+it findCloseStringMatch(it first, it last, const std::string &s)
+{
+    it alternative = last;
+    unsigned int alternative_distance = UINT_MAX;
+
+    for (auto possible_key = first; possible_key != last; ++possible_key)
+    {
+        unsigned int distance = distanceBetweenStrings(s, *possible_key);
+
+        // We only want to suggest options that look a bit like the unknown
+        // one. Experimentally I found 50% of the total length a decent
+        // cutoff.
+        //
+        // The mathemathical formula "distance/length < 0.5" can be
+        // approximated with integers as "distance*2/length < 1"
+        if ((distance * 2) / s.length() < 1 && distance < alternative_distance)
+        {
+            alternative = possible_key;
+            alternative_distance = distance;
+        }
+    }
+
+    return alternative;
+}
+
 uint32_t ageFromTimePoint(const std::chrono::time_point<std::chrono::steady_clock> &point);
 std::chrono::time_point<std::chrono::steady_clock> timepointFromAge(const uint32_t age);
 
@@ -151,6 +180,106 @@ void exceptionOnNonMqtt(const std::vector<char> &data);
 uint16_t getFirstWildcardDepth(const std::vector<std::string> &subtopics);
 std::string reasonCodeToString(ReasonCodes code);
 std::string packetTypeToString(PacketType ptype);
+std::string propertyToString(Mqtt5Properties p);
+
+
+/**
+ * @brief parseValuesWithOptionalQuoting parses argument lists space encoded, with quote and escaping support.
+ * @param s
+ * @return
+ *
+ * So, like
+ *
+ *  "hallo" "you": becomes a vector with those two strings, but without the quote.
+ *  hallo  you: is the same as above.
+ *  "hallo" you: is the same as above.
+ *  "hallo you": is a vector with one element.
+ *  "I quote you with \"" is: I quote you with "
+ *  'I quote you with "'  is: I quote you with "
+ */
+template<typename ex>
+std::vector<std::string> parseValuesWithOptionalQuoting(std::string s)
+{
+    trim(s);
+    std::vector<std::string> result;
+
+    char quote = 0;
+    std::string cur;
+    bool escape = false;
+
+    for (char c : s)
+    {
+        if (escape)
+        {
+            if (!(c == '"' || c == '\'' || c == '\\'))
+                throw ex("Invalid escape");
+
+            cur.push_back(c);
+            escape = false;
+        }
+        else if (c == '\\')
+        {
+            escape = true;
+        }
+        else if (std::isspace(c))
+        {
+            if (quote)
+                cur.push_back(c);
+            else if (!cur.empty())
+            {
+                result.push_back(cur);
+                cur.clear();
+            }
+        }
+        else if (c == '"' || c == '\'')
+        {
+            if (quote == 0)
+            {
+                quote = c;
+            }
+            else if (quote == c)
+            {
+                result.push_back(cur);
+                cur.clear();
+                quote = 0;
+            }
+            else
+            {
+                cur.push_back(c);
+            }
+        }
+        else
+        {
+            cur.push_back(c);
+        }
+    }
+
+    if (!cur.empty())
+        result.push_back(cur);
+
+    if (quote)
+        throw ex("Unterminated quote");
+
+    return result;
+}
+
+template<typename T>
+class DecrementGuard
+{
+    T &n;
+public:
+    DecrementGuard(T &n) :
+        n(n)
+    {
+
+    }
+
+    ~DecrementGuard()
+    {
+        n--;
+        assert(n >= 0);
+    }
+};
 
 
 #endif // UTILS_H

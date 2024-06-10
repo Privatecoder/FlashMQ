@@ -12,16 +12,19 @@ See LICENSE for license details.
 #include <unordered_map>
 #include <sys/sysinfo.h>
 #include <fstream>
+#include <random>
 
 #include "maintests.h"
 #include "testhelpers.h"
 #include "flashmqtestclient.h"
 #include "conffiletemp.h"
+#include "mainappasfork.h"
 
 #include "threadglobals.h"
 #include "threadlocalutils.h"
 #include "retainedmessagesdb.h"
 #include "utils.h"
+#include "exceptions.h"
 
 void MainTests::test_circbuf()
 {
@@ -1124,6 +1127,78 @@ void MainTests::testParsePacket()
     }
 }
 
+/**
+ * @brief MainTests::testbufferToMqttPacketsFuzz perform a quick fuzz on parsing MQTT packets.
+ *
+ * There was some chatter about this function maybe crashing, so this test was added. Nothing
+ * could be reproduced, not even when running for hours.
+ */
+void MainTests::testbufferToMqttPacketsFuzz()
+{
+    Logger::getInstance()->setFlags(LogLevel::None, false);
+
+    Settings settings;
+    settings.logLevel = LogLevel::Info;
+    std::shared_ptr<SubscriptionStore> store(new SubscriptionStore());
+    PluginLoader pluginLoader;
+    std::shared_ptr<ThreadData> t(new ThreadData(0, settings, pluginLoader));
+
+    // Kind of a hack...
+    Authentication auth(settings);
+    ThreadGlobals::assign(&auth);
+
+    settings.maxPacketSize = 32768;
+
+    std::shared_ptr<Client> dummyClient(new Client(0, t, nullptr, false, false, nullptr, settings, false));
+    dummyClient->setClientProperties(ProtocolVersion::Mqtt311, "dummy", "user1", true, 60);
+    store->registerClientAndKickExistingOne(dummyClient, false, 512, 120);
+
+    // To avoid the restriction on packet size for unauthenticated clients.
+    dummyClient->setAuthenticated(true);
+
+    // To avoid writing random MQTT headers that happen to say 'packet is 100 MB big' and will result in the parser
+    // thinking we are supposed to get more bytes, which will make it get stuck.
+    const ssize_t len = settings.maxPacketSize * 2;
+
+    std::vector<uint8_t> randombuf(len);
+
+    CirBuf stagingBuf(len);
+
+    size_t protocol_error_count = 0;
+    size_t parsed_packet_count = 0;
+
+    const auto then = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+    for (auto now = std::chrono::steady_clock::now(); now < then; now = std::chrono::steady_clock::now())
+    {
+        if (getrandom(randombuf.data(), len, 0) != len)
+            throw std::runtime_error("Random error");
+
+        std::vector<MqttPacket> parsedPackets;
+        stagingBuf.ensureFreeSpace(len);
+        stagingBuf.write(randombuf.data(), len);
+
+        try
+        {
+            MqttPacket::bufferToMqttPackets(stagingBuf, parsedPackets, dummyClient);
+            parsed_packet_count += parsedPackets.size();
+            FMQ_VERIFY(true);
+        }
+        catch (ProtocolError&)
+        {
+            stagingBuf.reset();
+            protocol_error_count++;
+            FMQ_VERIFY(true);
+        }
+        catch (std::exception&)
+        {
+            FMQ_VERIFY(false);
+        }
+    }
+
+    std::cout << std::endl << "Flash-fuzzing bufferToMqttPackets done. Parsed packets: "
+              << parsed_packet_count << ". Protocol errors: " << protocol_error_count << std::endl;
+}
+
 void testDowngradeQoSOnSubscribeHelper(const uint8_t pub_qos, const uint8_t sub_qos)
 {
     std::vector<ProtocolVersion> protocols {ProtocolVersion::Mqtt311, ProtocolVersion::Mqtt5};
@@ -1650,6 +1725,56 @@ void MainTests::testOutgoingTopicAlias()
         QCOMPARE(packet.getPayloadCopy(), "ABCDEF");
         MYCASTCOMPARE(packet.bites.size(), 28); // That's 3 less than the other one, because the alias id is not there.
     });
+}
+
+void MainTests::testOutgoingTopicAliasBeyondMax()
+{
+    FlashMQTestClient receiver1;
+    receiver1.start();
+    receiver1.connectClient(ProtocolVersion::Mqtt5, true, 300, [](Connect &connect){
+        connect.propertyBuilder->writeMaxTopicAliases(5);
+    });
+    receiver1.subscribe("+/bottles/of/beer/on/the/wall/take/one/down/pass/it/around", 0);
+
+    FlashMQTestClient sender;
+    sender.start();
+    sender.connectClient(ProtocolVersion::Mqtt311);
+
+    // Set all the aliases with first publishes.
+    for (int i = 0; i < 7; i++)
+    {
+        sender.publish(std::to_string(i) + "/bottles/of/beer/on/the/wall/take/one/down/pass/it/around", "ABCDEF", 0);
+    }
+
+    receiver1.waitForMessageCount(7);
+
+    for (int i = 0; i < 7; i++)
+    {
+        auto &packet = receiver1.receivedPublishes.at(i);
+        FMQ_COMPARE(packet.getTopic(), std::to_string(i) + "/bottles/of/beer/on/the/wall/take/one/down/pass/it/around");
+        size_t expected_size = i < 5 ? 72 : 69; // The ones with a topic alias in them are slightly bigger.
+        FMQ_COMPARE(packet.bites.size(), expected_size);
+    }
+
+    receiver1.clearReceivedLists();
+
+    // Now again, which means the aliases should be used for the known topics.
+    for (int i = 0; i < 7; i++)
+    {
+        sender.publish(std::to_string(i) + "/bottles/of/beer/on/the/wall/take/one/down/pass/it/around", "ABCDEF", 0);
+    }
+
+    receiver1.waitForMessageCount(7);
+
+    // Now the first give should be smaller, and the last two normal (no topic alias property and the topic string included).
+    for (int i = 0; i < 7; i++)
+    {
+        auto &packet = receiver1.receivedPublishes.at(i);
+        FMQ_COMPARE(packet.getTopic(), std::to_string(i) + "/bottles/of/beer/on/the/wall/take/one/down/pass/it/around");
+        size_t expected_size = i < 5 ? 14 : 69;
+        FMQ_COMPARE(packet.bites.size(), expected_size);
+    }
+
 }
 
 void MainTests::testOutgoingTopicAliasStoredPublishes()
@@ -2831,6 +2956,40 @@ void MainTests::testTopicMatchingInSubscriptionTree()
     testTopicMatchingInSubscriptionTreeHelper("+/one/+/+/", "/one/two/asdf/a", 0);
 }
 
+void MainTests::testStartsWith()
+{
+    FMQ_VERIFY(startsWith("", ""));
+    FMQ_VERIFY(startsWith("a", ""));
+    FMQ_VERIFY(startsWith("abcd", "abc"));
+    FMQ_VERIFY(startsWith("a", ""));
 
+    FMQ_VERIFY(!startsWith("abc", "abcd"));
+    FMQ_VERIFY(!startsWith("abcd", "bcd"));
+    FMQ_VERIFY(!startsWith("", "a"));
+}
+
+void MainTests::forkingTestForkingTestServer()
+{
+    cleanup();
+
+    MainAppAsFork app;
+    app.start();
+    app.waitForStarted();
+
+    FlashMQTestClient sender;
+    FlashMQTestClient receiver;
+
+    sender.start();
+    receiver.start();
+
+    receiver.connectClient(ProtocolVersion::Mqtt5);
+    receiver.subscribe("#", 0);
+
+    sender.connectClient(ProtocolVersion::Mqtt5);
+    sender.publish("bla", "payload", 0);
+
+    receiver.waitForMessageCount(1);
+    MYCASTCOMPARE(receiver.receivedPublishes.size(), 1);
+}
 
 

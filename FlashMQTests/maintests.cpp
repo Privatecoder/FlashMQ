@@ -107,35 +107,44 @@ void MainTests::testAsserts()
 
 }
 
-void MainTests::initBeforeEachTest(const std::vector<std::string> &args)
+void MainTests::initBeforeEachTest(const std::vector<std::string> &args, bool startServer)
 {
     mainApp.reset();
-    mainApp = std::make_unique<MainAppInThread>(args);
-    mainApp->start();
-    mainApp->waitForStarted();
+
+    if (startServer)
+    {
+        mainApp = std::make_unique<MainAppInThread>(args);
+        mainApp->start();
+        mainApp->waitForStarted();
+    }
 
     // We test functions directly that the server normally only calls from worker threads, in which thread data is available. This is kind of a dummy-fix, until
     // we actually need correct thread data at those points (at this point, it's only to increase message counters).
-    Settings settings;
     PluginLoader pluginLoader;
     this->dummyThreadData = std::make_shared<ThreadData>(666, settings, pluginLoader);
     ThreadGlobals::assignThreadData(dummyThreadData.get());
+    ThreadGlobals::assignSettings(&this->settings);
 }
 
-void MainTests::initBeforeEachTest()
+void MainTests::initBeforeEachTest(bool startServer)
 {
     std::vector<std::string> args;
-    initBeforeEachTest(args);
+    initBeforeEachTest(args, startServer);
 }
 
 void MainTests::cleanupAfterEachTest()
 {
-    this->mainApp->stopApp();
+    if (this->mainApp)
+        this->mainApp->stopApp();
+    this->mainApp.reset();
 }
 
-void MainTests::registerFunction(const std::string &name, std::function<void ()> f)
+void MainTests::registerFunction(const std::string &name, std::function<void ()> f, bool requiresServer, bool requiresInternet)
 {
-    this->testFunctions[name] = f;
+    TestFunction &tf = testFunctions[name];
+    tf.f = f;
+    tf.requiresServer = requiresServer;
+    tf.requiresInternet = requiresInternet;
 }
 
 void MainTests::testDummy()
@@ -157,12 +166,18 @@ MainTests::MainTests()
     assert_count = 0;
     assert_fail_count = 0;
 
+    /*
+     * Forking tests need to be done first (by alphabet), otherwise you break everything with DNS. This is a limitation
+     * of getaddrinfo_a(). So, name them appropriately.
+     */
+    REGISTER_FUNCTION(forkingTestForkingTestServer);
+
     REGISTER_FUNCTION(testDummy);
-    REGISTER_FUNCTION(test_circbuf);
-    REGISTER_FUNCTION(test_circbuf_unwrapped_doubling);
-    REGISTER_FUNCTION(test_circbuf_wrapped_doubling);
-    REGISTER_FUNCTION(test_circbuf_full_wrapped_buffer_doubling);
-    REGISTER_FUNCTION(test_validSubscribePath);
+    REGISTER_FUNCTION3(test_circbuf);
+    REGISTER_FUNCTION3(test_circbuf_unwrapped_doubling);
+    REGISTER_FUNCTION3(test_circbuf_wrapped_doubling);
+    REGISTER_FUNCTION3(test_circbuf_full_wrapped_buffer_doubling);
+    REGISTER_FUNCTION3(test_validSubscribePath);
     REGISTER_FUNCTION(test_retained);
     REGISTER_FUNCTION(test_retained_double_set);
     REGISTER_FUNCTION(test_retained_mode_drop);
@@ -179,29 +194,30 @@ MainTests::MainTests()
     REGISTER_FUNCTION(testRetainedWildcard);
     REGISTER_FUNCTION(testRetainedAclReadCheck);
     REGISTER_FUNCTION(test_various_packet_sizes);
-    REGISTER_FUNCTION(test_acl_tree);
-    REGISTER_FUNCTION(test_acl_tree2);
-    REGISTER_FUNCTION(test_acl_patterns_username);
-    REGISTER_FUNCTION(test_acl_patterns_clientid);
+    REGISTER_FUNCTION3(test_acl_tree);
+    REGISTER_FUNCTION3(test_acl_tree2);
+    REGISTER_FUNCTION3(test_acl_patterns_username);
+    REGISTER_FUNCTION3(test_acl_patterns_clientid);
     REGISTER_FUNCTION(test_loading_acl_file);
-    REGISTER_FUNCTION(test_loading_second_value);
-    REGISTER_FUNCTION(test_parsing_numbers);
-    REGISTER_FUNCTION(test_validUtf8Generic);
+    REGISTER_FUNCTION3(test_loading_second_value);
+    REGISTER_FUNCTION3(test_parsing_numbers);
+    REGISTER_FUNCTION3(test_validUtf8Generic);
 
 #ifndef FMQ_NO_SSE
-    REGISTER_FUNCTION(test_sse_split);
-    REGISTER_FUNCTION(test_validUtf8Sse);
-    REGISTER_FUNCTION(test_utf8_nonchars);
-    REGISTER_FUNCTION(test_utf8_overlong);
-    REGISTER_FUNCTION(test_utf8_compare_implementation);
+    REGISTER_FUNCTION3(test_sse_split);
+    REGISTER_FUNCTION3(test_validUtf8Sse);
+    REGISTER_FUNCTION3(test_utf8_nonchars);
+    REGISTER_FUNCTION3(test_utf8_overlong);
+    REGISTER_FUNCTION3(test_utf8_compare_implementation);
 #endif
 
-    REGISTER_FUNCTION(testPacketInt16Parse);
-    REGISTER_FUNCTION(testRetainedMessageDB);
-    REGISTER_FUNCTION(testRetainedMessageDBNotPresent);
-    REGISTER_FUNCTION(testRetainedMessageDBEmptyList);
-    REGISTER_FUNCTION(testSavingSessions);
-    REGISTER_FUNCTION(testParsePacket);
+    REGISTER_FUNCTION3(testPacketInt16Parse);
+    REGISTER_FUNCTION3(testRetainedMessageDB);
+    REGISTER_FUNCTION3(testRetainedMessageDBNotPresent);
+    REGISTER_FUNCTION3(testRetainedMessageDBEmptyList);
+    REGISTER_FUNCTION3(testSavingSessions);
+    REGISTER_FUNCTION3(testParsePacket);
+    REGISTER_FUNCTION3(testbufferToMqttPacketsFuzz);
     REGISTER_FUNCTION(testDowngradeQoSOnSubscribeQos2to2);
     REGISTER_FUNCTION(testDowngradeQoSOnSubscribeQos2to1);
     REGISTER_FUNCTION(testDowngradeQoSOnSubscribeQos2to0);
@@ -223,8 +239,11 @@ MainTests::MainTests()
     REGISTER_FUNCTION(testOverrideWillDelayOnSessionDestructionByTakeOver);
     REGISTER_FUNCTION(testDisabledWills);
     REGISTER_FUNCTION(testMqtt5DelayedWillsDisabled);
+    REGISTER_FUNCTION3(testStringDistances);
+    REGISTER_FUNCTION3(testConfigSuggestion);
     REGISTER_FUNCTION(testIncomingTopicAlias);
     REGISTER_FUNCTION(testOutgoingTopicAlias);
+    REGISTER_FUNCTION(testOutgoingTopicAliasBeyondMax);
     REGISTER_FUNCTION(testOutgoingTopicAliasStoredPublishes);
     REGISTER_FUNCTION(testReceivingRetainedMessageWithQoS);
     REGISTER_FUNCTION(testQosDowngradeOnOfflineClients);
@@ -232,14 +251,14 @@ MainTests::MainTests()
     REGISTER_FUNCTION(testMessageExpiry);
     REGISTER_FUNCTION(testExpiredQueuedMessages);
     REGISTER_FUNCTION(testQoSPublishQueue);
-    REGISTER_FUNCTION(testTimePointToAge);
+    REGISTER_FUNCTION3(testTimePointToAge);
     REGISTER_FUNCTION(testMosquittoPasswordFile);
     REGISTER_FUNCTION(testOverrideAllowAnonymousToTrue);
     REGISTER_FUNCTION(testOverrideAllowAnonymousToFalse);
     REGISTER_FUNCTION(testKeepAllowAnonymousFalse);
     REGISTER_FUNCTION(testAllowAnonymousWithoutPasswordsLoaded);
-    REGISTER_FUNCTION(testAddrMatchesSubnetIpv4);
-    REGISTER_FUNCTION(testAddrMatchesSubnetIpv6);
+    REGISTER_FUNCTION3(testAddrMatchesSubnetIpv4);
+    REGISTER_FUNCTION3(testAddrMatchesSubnetIpv6);
     REGISTER_FUNCTION(testSharedSubscribersUnit);
     REGISTER_FUNCTION(testSharedSubscribers);
     REGISTER_FUNCTION(testDisconnectedSharedSubscribers);
@@ -265,35 +284,41 @@ MainTests::MainTests()
     REGISTER_FUNCTION(testPublishByPlugin);
     REGISTER_FUNCTION(testWillDenialByPlugin);
     REGISTER_FUNCTION(testPluginMainInit);
-    REGISTER_FUNCTION(testAsyncCurl);
+    REGISTER_FUNCTION2(testAsyncCurl, true, true);
     REGISTER_FUNCTION(testSubscribeWithoutRetainedDelivery);
     REGISTER_FUNCTION(testDontUpgradeWildcardDenyMode);
     REGISTER_FUNCTION(testAlsoDontApproveOnErrorInPluginWithWildcardDenyMode);
     REGISTER_FUNCTION(testDenyWildcardSubscription);
     REGISTER_FUNCTION(testPublishToItself);
     REGISTER_FUNCTION(testNoLocalPublishToItself);
-    REGISTER_FUNCTION(testTopicMatchingInSubscriptionTree);
-    REGISTER_FUNCTION(testDnsResolver);
-    REGISTER_FUNCTION(testDnsResolverDontCancel);
-    REGISTER_FUNCTION(testDnsResolverSecondQuery);
-    REGISTER_FUNCTION(testDnsResolverInvalid);
+    REGISTER_FUNCTION3(testTopicMatchingInSubscriptionTree);
+    REGISTER_FUNCTION2(testDnsResolver, false, true);
+    REGISTER_FUNCTION2(testDnsResolverDontCancel, false, true);
+    REGISTER_FUNCTION2(testDnsResolverSecondQuery, false, true);
+    REGISTER_FUNCTION2(testDnsResolverInvalid, false, true);
     REGISTER_FUNCTION(testGetResultWhenThereIsNone);
     REGISTER_FUNCTION(testWebsocketPing);
     REGISTER_FUNCTION(testWebsocketCorruptLengthFrame);
     REGISTER_FUNCTION(testWebsocketHugePing);
     REGISTER_FUNCTION(testWebsocketManyBigPingFrames);
     REGISTER_FUNCTION(testWebsocketClose);
+    REGISTER_FUNCTION3(testStartsWith);
+    REGISTER_FUNCTION3(testStringValuesParsing);
+    REGISTER_FUNCTION3(testStringValuesParsingEscaping);
+    REGISTER_FUNCTION3(testStringValuesFuzz);
+    REGISTER_FUNCTION3(testStringValuesInvalid);
+    REGISTER_FUNCTION2(testPreviouslyValidConfigFile, false, false);
 }
 
-bool MainTests::test(const std::vector<std::string> &tests)
+bool MainTests::test(bool skip_tests_with_internet, bool skip_server_tests, const std::vector<std::string> &tests)
 {
     int testCount = 0;
     int testPassCount = 0;
     int testFailCount = 0;
     int testExceptionCount = 0;
 
-    std::unordered_map<std::string, std::function<void()>> *selectedTests = &this->testFunctions;
-    std::unordered_map<std::string, std::function<void()>> subset;
+    std::map<std::string, TestFunction> *selectedTests = &this->testFunctions;
+    std::map<std::string, TestFunction> subset;
 
     for(const std::string &test_name : tests)
     {
@@ -317,6 +342,14 @@ bool MainTests::test(const std::vector<std::string> &tests)
 
     for (const auto &pair : *selectedTests)
     {
+        const TestFunction &tf = pair.second;
+
+        if (skip_tests_with_internet && tf.requiresInternet)
+            continue;
+
+        if (skip_server_tests && tf.requiresServer)
+            continue;
+
         testCount++;
 
         try
@@ -324,13 +357,13 @@ bool MainTests::test(const std::vector<std::string> &tests)
             std::cout << CYAN << "INIT" << COLOR_END << ": " << pair.first << std::endl;
 
             TestInitializer testInitializer(this);
-            testInitializer.init();
+            testInitializer.init(tf.requiresServer);
 
             const int failCountBefore = assert_fail_count;
             const int assertCountBefore = assert_count;
 
             std::cout << CYAN << "RUN" << COLOR_END << ": " << pair.first << std::endl;
-            pair.second();
+            tf.f();
 
             const int failCountAfter = assert_fail_count;
             const int assertCountAfter = assert_count;
@@ -375,7 +408,12 @@ bool MainTests::test(const std::vector<std::string> &tests)
 
     std::cout << std::endl << std::endl;
 
-    if (assert_fail_count == 0 && testFailCount == 0)
+    if (testCount == 0)
+    {
+        std::cout << std::endl << RED << "No tests ran." << COLOR_END << std::endl;
+        return false;
+    }
+    else if (assert_fail_count == 0 && testFailCount == 0)
     {
         std::cout << std::endl << GREEN << "TESTS PASSED" << COLOR_END << std::endl;
         return true;

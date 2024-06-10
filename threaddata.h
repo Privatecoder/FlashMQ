@@ -22,6 +22,7 @@ See LICENSE for license details.
 #include <functional>
 #include <chrono>
 #include <forward_list>
+#include <random>
 
 #include "client.h"
 #include "plugin.h"
@@ -30,6 +31,7 @@ See LICENSE for license details.
 #include "queuedtasks.h"
 #include "settings.h"
 #include "bridgeconfig.h"
+#include "driftcounter.h"
 
 typedef void (*thread_f)(ThreadData *);
 
@@ -52,10 +54,19 @@ public:
     AsyncAuth(std::weak_ptr<Client> client, AuthResult result, const std::string authMethod, const std::string &authData);
 };
 
+struct QueuedRetainedMessage
+{
+    const Publish p;
+    const std::vector<std::string> subtopics;
+    const std::chrono::time_point<std::chrono::steady_clock> limit;
+
+    QueuedRetainedMessage(const Publish &p, const std::vector<std::string> &subtopics, const std::chrono::time_point<std::chrono::steady_clock> limit);
+};
+
 class ThreadData
 {
     std::unordered_map<int, std::shared_ptr<Client>> clients_by_fd;
-    std::vector<std::shared_ptr<BridgeState>> bridges;
+    std::unordered_map<std::string, std::shared_ptr<BridgeState>> bridges;
     std::mutex clients_by_fd_mutex;
     Logger *logger;
 
@@ -67,6 +78,8 @@ class ThreadData
 
     std::mutex queuedKeepAliveMutex;
     std::map<std::chrono::seconds, std::vector<KeepAliveCheck>> queuedKeepAliveChecks;
+
+    std::list<QueuedRetainedMessage> queuedRetainedMessages;
 
     const PluginLoader &pluginLoader;
 
@@ -91,6 +104,7 @@ class ThreadData
 
     void removeQueuedClients();
     void publishWithAcl(Publish &pub, bool setRetain=false);
+    void removeBridge(std::shared_ptr<BridgeConfig> bridgeConfig, const std::string &reason);
 
 public:
     Settings settingsLocalCopy; // Is updated on reload, within the thread loop.
@@ -101,11 +115,12 @@ public:
     bool allDisconnectsSent = false;
     std::thread thread;
     int threadnr = 0;
-    int epollfd = 0;
-    int taskEventFd = 0;
+    int epollfd = -1;
+    int taskEventFd = -1;
     std::mutex taskQueueMutex;
     std::list<std::function<void()>> taskQueue;
     QueuedTasks delayedTasks;
+    DriftCounter driftCounter;
     std::unordered_map<int, std::weak_ptr<void>> externalFds;
 
     DerivableCounter receivedMessageCounter;
@@ -115,15 +130,21 @@ public:
     DerivableCounter aclWriteChecks;
     DerivableCounter aclSubscribeChecks;
     DerivableCounter aclRegisterWillChecks;
+    DerivableCounter deferredRetainedMessagesSet;
+    DerivableCounter deferredRetainedMessagesSetTimeout;
+
+    std::minstd_rand randomish;
 
     ThreadData(int threadnr, const Settings &settings, const PluginLoader &pluginLoader);
     ThreadData(const ThreadData &other) = delete;
     ThreadData(ThreadData &&other) = delete;
+    ~ThreadData();
 
     void start(thread_f f);
 
     void giveClient(std::shared_ptr<Client> &&client);
-    void giveBridge(std::shared_ptr<BridgeState> &bridgeConfig);
+    void giveBridge(std::shared_ptr<BridgeState> &bridgeState);
+    void removeBridgeQueued(std::shared_ptr<BridgeConfig> bridgeConfig, const std::string &reason);
     std::shared_ptr<Client> getClient(int fd);
     void removeClientQueued(const std::shared_ptr<Client> &client);
     void removeClientQueued(int fd);
@@ -148,6 +169,10 @@ public:
                                       std::weak_ptr<BridgeState> &&bridgeState);
     void queueBridgeReconnect();
     void publishBridgeState(std::shared_ptr<BridgeState> bridge, bool connected);
+    void queueSettingRetainedMessage(const Publish &p, const std::vector<std::string> &subtopics, const std::chrono::time_point<std::chrono::steady_clock> limit);
+    void setQueuedRetainedMessages();
+    bool queuedRetainedMessagesEmpty() const;
+    void clearQueuedRetainedMessages();
 
     int getNrOfClients() const;
 
@@ -156,6 +181,7 @@ public:
 
     void queueSendWills();
     void queueSendDisconnects();
+    void queueInternalHeartbeat();
 
     void pollExternalFd(int fd, uint32_t events, const std::weak_ptr<void> &p);
     void pollExternalRemove(int fd);

@@ -429,9 +429,12 @@ void MqttPacket::handle()
         }
 
         if (!(packetType == PacketType::CONNECT || packetType == PacketType::AUTH || packetType == PacketType::DISCONNECT ||
-              packetType == PacketType::PINGREQ || packetType == PacketType::PINGRESP || packetType == PacketType::CONNACK))
+              packetType == PacketType::CONNACK))
         {
             exceptionOnNonMqtt(this->bites);
+
+            if (sender->preAuthPacketCounter++ > 200)
+                throw ProtocolError("Too many pre-auth packets dropped", ReasonCodes::ProtocolError);
 
             logger->log(LOG_WARNING) << "Unapproved packet type (" << packetTypeToString(packetType)
                                      << ") from non-authenticated client " << sender->repr() << ". Dropping packet.";
@@ -542,6 +545,9 @@ ConnectData MqttPacket::parseConnectData()
         const size_t proplen = decodeVariableByteIntAtPos();
         const size_t prop_end_at = pos + proplen;
 
+        std::array<uint8_t, 8> pcounts;
+        pcounts.fill(0);
+
         while (pos < prop_end_at)
         {
             const Mqtt5Properties prop = static_cast<Mqtt5Properties>(readUint8());
@@ -549,33 +555,71 @@ ConnectData MqttPacket::parseConnectData()
             switch (prop)
             {
             case Mqtt5Properties::SessionExpiryInterval:
+                if (pcounts[0]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.session_expire = std::min<uint32_t>(readFourBytesToUint32(), settings.getExpireSessionAfterSeconds());
                 break;
             case Mqtt5Properties::ReceiveMaximum:
+                if (pcounts[1]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.client_receive_max = std::min<int16_t>(readTwoBytesToUInt16(), result.client_receive_max);
                 break;
             case Mqtt5Properties::MaximumPacketSize:
+                if (pcounts[2]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.max_outgoing_packet_size = std::min<uint32_t>(readFourBytesToUint32(), result.max_outgoing_packet_size);
                 break;
             case Mqtt5Properties::TopicAliasMaximum:
+                if (pcounts[3]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.max_outgoing_topic_aliases = std::min<uint16_t>(readTwoBytesToUInt16(), settings.maxOutgoingTopicAliasValue);
                 break;
             case Mqtt5Properties::RequestResponseInformation:
-                result.request_response_information = !!readByte();
+            {
+                if (pcounts[4]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
+                const uint8_t x = readUint8();
+
+                if (x > 1)
+                    throw ProtocolError(propertyToString(prop) + " must be 0 or 1", ReasonCodes::ProtocolError);
+
+                result.request_response_information = static_cast<bool>(x);
                 break;
+            }
             case Mqtt5Properties::RequestProblemInformation:
-                result.request_problem_information = !!readByte();
+            {
+                if (pcounts[5]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
+                const uint8_t x = readUint8();
+
+                if (x > 1)
+                    throw ProtocolError(propertyToString(prop) + " must be 0 or 1", ReasonCodes::ProtocolError);
+
+                result.request_problem_information = static_cast<bool>(x);
                 break;
+            }
             case Mqtt5Properties::UserProperty:
                 readUserProperty();
                 break;
             case Mqtt5Properties::AuthenticationMethod:
             {
+                if (pcounts[6]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.authenticationMethod = readBytesToString();
                 break;
             }
             case Mqtt5Properties::AuthenticationData:
             {
+                if (pcounts[7]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.authenticationData = readBytesToString(false);
                 break;
             }
@@ -584,6 +628,9 @@ ConnectData MqttPacket::parseConnectData()
             }
         }
     }
+
+    if (result.authenticationMethod.empty() && !result.authenticationData.empty())
+        throw ProtocolError("Including authentication data when there is no authentication method is not allowed", ReasonCodes::ProtocolError);
 
     if (result.client_receive_max == 0 || result.max_outgoing_packet_size == 0)
     {
@@ -619,6 +666,9 @@ ConnectData MqttPacket::parseConnectData()
             const size_t proplen = decodeVariableByteIntAtPos();
             const size_t prop_end_at = pos + proplen;
 
+            std::array<uint8_t, 8> pcounts;
+            pcounts.fill(0);
+
             while (pos < prop_end_at)
             {
                 const Mqtt5Properties prop = static_cast<Mqtt5Properties>(readUint8());
@@ -626,31 +676,49 @@ ConnectData MqttPacket::parseConnectData()
                 switch (prop)
                 {
                 case Mqtt5Properties::WillDelayInterval:
+                    if (pcounts[0]++ > 0)
+                        throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                     result.willpublish.will_delay = readFourBytesToUint32();
                     break;
                 case Mqtt5Properties::PayloadFormatIndicator:
+                    if (pcounts[1]++ > 0)
+                        throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                     result.willpublish.propertyBuilder->writePayloadFormatIndicator(readByte());
                     break;
                 case Mqtt5Properties::ContentType:
                 {
+                    if (pcounts[2]++ > 0)
+                        throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                     const std::string contentType = readBytesToString();
                     result.willpublish.propertyBuilder->writeContentType(contentType);
                     break;
                 }
                 case Mqtt5Properties::ResponseTopic:
                 {
+                    if (pcounts[3]++ > 0)
+                        throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                     const std::string responseTopic = readBytesToString(true, true);
                     result.willpublish.propertyBuilder->writeResponseTopic(responseTopic);
                     break;
                 }
                 case Mqtt5Properties::MessageExpiryInterval:
                 {
+                    if (pcounts[4]++ > 0)
+                        throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                     const uint32_t expiresAfter = readFourBytesToUint32();
                     result.willpublish.setExpireAfter(expiresAfter);
                     break;
                 }
                 case Mqtt5Properties::CorrelationData:
                 {
+                    if (pcounts[5]++ > 0)
+                        throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                     const std::string correlationData = readBytesToString(false);
                     result.willpublish.propertyBuilder->writeCorrelationData(correlationData);
                     break;
@@ -673,8 +741,22 @@ ConnectData MqttPacket::parseConnectData()
 
         result.willpublish.topic = readBytesToString(true, true);
 
+        if (result.willpublish.topic.empty())
+        {
+            logger->log(LOG_WARNING) << "Empty will topic is not allowed. Dropping will for client " << sender->repr() << ".";
+            result.will_flag = false;
+        }
+
         uint16_t will_payload_length = readTwoBytesToUInt16();
         result.willpublish.payload = std::string(readBytes(will_payload_length), will_payload_length);
+    }
+    else
+    {
+        if (result.will_retain)
+            throw ProtocolError("Will retain bit can't be set without will.", ReasonCodes::ProtocolError);
+
+        if (result.will_qos != 0)
+            throw ProtocolError("Will QoS must be 0 when there is no will.", ReasonCodes::ProtocolError);
     }
 
     if (user_name_flag)
@@ -735,6 +817,9 @@ ConnAckData MqttPacket::parseConnAckData()
         const size_t proplen = decodeVariableByteIntAtPos();
         const size_t prop_end_at = pos + proplen;
 
+        std::array<uint8_t, 16> pcounts;
+        pcounts.fill(0);
+
         while (pos < prop_end_at)
         {
             const Mqtt5Properties prop = static_cast<Mqtt5Properties>(readUint8());
@@ -742,28 +827,51 @@ ConnAckData MqttPacket::parseConnAckData()
             switch (prop)
             {
             case Mqtt5Properties::SessionExpiryInterval:
+                if (pcounts[0]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.session_expire = std::min<uint32_t>(readFourBytesToUint32(), result.session_expire);
                 break;
             case Mqtt5Properties::ReceiveMaximum:
+                if (pcounts[1]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.client_receive_max = std::min<int16_t>(readTwoBytesToUInt16(), result.client_receive_max);
                 break;
             case Mqtt5Properties::MaximumQoS:
+                if (pcounts[2]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.max_qos = std::min<uint8_t>(readUint8(), result.max_qos);
                 break;
             case Mqtt5Properties::RetainAvailable:
+                if (pcounts[3]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.retained_available = static_cast<bool>(readByte());
                 break;
             case Mqtt5Properties::MaximumPacketSize:
+                if (pcounts[4]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.max_outgoing_packet_size = std::min<uint32_t>(readFourBytesToUint32(), result.max_outgoing_packet_size);
                 break;
             case Mqtt5Properties::AssignedClientIdentifier:
+                if (pcounts[5]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.assigned_client_id = readBytesToString();
                 break;
             case Mqtt5Properties::TopicAliasMaximum:
+                if (pcounts[6]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
                 result.max_outgoing_topic_aliases = std::min<uint16_t>(readTwoBytesToUInt16(), settings.maxOutgoingTopicAliasValue);
                 break;
             case Mqtt5Properties::ReasonString:
             {
+                if (pcounts[7]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 const std::string reason = readBytesToString();
                 logger->logf(LOG_NOTICE, "ConnAck reason string: %s", reason.c_str());
                 break;
@@ -775,27 +883,51 @@ ConnAckData MqttPacket::parseConnAckData()
                 break;
             }
             case Mqtt5Properties::WildcardSubscriptionAvailable:
+                if (pcounts[8]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 readByte();
                 break;
             case Mqtt5Properties::SubscriptionIdentifierAvailable:
+                if (pcounts[9]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 readByte();
                 break;
             case Mqtt5Properties::SharedSubscriptionAvailable:
+                if (pcounts[10]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.shared_subscriptions_available = !!readByte();
                 break;
             case Mqtt5Properties::ServerKeepAlive:
+                if (pcounts[11]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.keep_alive = readTwoBytesToUInt16();
                 break;
             case Mqtt5Properties::ResponseInformation:
+                if (pcounts[12]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.response_information = readBytesToString();
                 break;
             case Mqtt5Properties::ServerReference:
+                if (pcounts[13]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.server_reference = readBytesToString();
                 break;
             case Mqtt5Properties::AuthenticationMethod:
+                if (pcounts[14]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.authMethod = readBytesToString();
                 break;
             case Mqtt5Properties::AuthenticationData:
+                if (pcounts[15]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.authData = readBytesToString();
                 break;
             default:
@@ -823,7 +955,7 @@ void MqttPacket::handleConnect()
     sender->setHasConnectPacketSeen();
     sender->setProtocolVersion(this->protocolVersion);
 
-    sender->setBridge(connectData.bridge);
+    sender->setClientType(connectData.bridge ? ClientType::Mqtt3DefactoBridge : ClientType::Normal);
 
     if (this->protocolVersion == ProtocolVersion::None)
     {
@@ -1003,7 +1135,8 @@ void MqttPacket::handleConnAck()
 
     if (data.reasonCode != ReasonCodes::Success)
     {
-        throw std::runtime_error(formatString("Client '%s' connection failed. Reason code: %d", sender->repr().c_str(), data.reasonCode));
+        const std::string err = "Client '" + sender->repr() + "' connection failed. Reason: " + reasonCodeToString(data.reasonCode) ;
+        throw std::runtime_error(err);
     }
 
     if (!settings->allowUnsafeClientidChars && containsDangerousCharacters(data.assigned_client_id))
@@ -1039,8 +1172,6 @@ void MqttPacket::handleConnAck()
 
     sender->setClientProperties(true, keepalive, data.max_outgoing_packet_size, effectiveMaxOutgoingTopicAliases, realRetainedAvailable);
     session->setSessionProperties(data.client_receive_max, bridgeState->c.localSessionExpiryInterval, bridgeState->c.localCleanStart, bridgeState->c.protocolVersion);
-
-    ThreadGlobals::getThreadData()->queueClientNextKeepAliveCheckLocked(sender, true);
 
     // This resubscribes also when there is already a session with subscriptions remotely, but that is required when you change QoS levels, for instance. It
     // will not unsubscribe, so it will add to the existing subscriptions.
@@ -1098,6 +1229,9 @@ AuthPacketData MqttPacket::parseAuthData()
         const size_t proplen = decodeVariableByteIntAtPos();
         const size_t prop_end_at = pos + proplen;
 
+        std::array<uint8_t, 4> pcounts;
+        pcounts.fill(0);
+
         while (pos < prop_end_at)
         {
             const Mqtt5Properties prop = static_cast<Mqtt5Properties>(readUint8());
@@ -1105,12 +1239,21 @@ AuthPacketData MqttPacket::parseAuthData()
             switch (prop)
             {
             case Mqtt5Properties::AuthenticationMethod:
+                if (pcounts[0]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.method = readBytesToString();
                 break;
             case Mqtt5Properties::AuthenticationData:
+                if (pcounts[1]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.data = readBytesToString(false);
                 break;
             case Mqtt5Properties::ReasonString:
+                if (pcounts[2]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 readBytesToString();
                 break;
             case Mqtt5Properties::UserProperty:
@@ -1121,6 +1264,9 @@ AuthPacketData MqttPacket::parseAuthData()
             }
         }
     }
+
+    if (result.method.empty() && !result.data.empty())
+        throw ProtocolError("Including authentication data when there is no authentication method is not allowed", ReasonCodes::ProtocolError);
 
     return result;
 }
@@ -1186,6 +1332,9 @@ DisconnectData MqttPacket::parseDisconnectData()
             const size_t proplen = decodeVariableByteIntAtPos();
             const size_t prop_end_at = pos + proplen;
 
+            std::array<uint8_t, 4> pcounts;
+            pcounts.fill(0);
+
             while (pos < prop_end_at)
             {
                 const Mqtt5Properties prop = static_cast<Mqtt5Properties>(readUint8());
@@ -1194,6 +1343,9 @@ DisconnectData MqttPacket::parseDisconnectData()
                 {
                 case Mqtt5Properties::SessionExpiryInterval:
                 {
+                    if (pcounts[0]++ > 0)
+                        throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                     const Settings *settings = ThreadGlobals::getSettings();
                     const uint32_t session_expire = std::min<uint32_t>(readFourBytesToUint32(), settings->getExpireSessionAfterSeconds());
                     result.session_expiry_interval = session_expire;
@@ -1202,11 +1354,17 @@ DisconnectData MqttPacket::parseDisconnectData()
                 }
                 case Mqtt5Properties::ReasonString:
                 {
+                    if (pcounts[1]++ > 0)
+                        throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                     result.reasonString = readBytesToString();
                     break;
                 }
                 case Mqtt5Properties::ServerReference:
                 {
+                    if (pcounts[2]++ > 0)
+                        throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                     readBytesToString();
                     break;
                 }
@@ -1306,8 +1464,9 @@ void MqttPacket::handleSubscribe()
 
         uint8_t qos = options.getQos();
 
-        const bool noLocal = sender->isBridge() || options.getNoLocal();
-        const bool retainedAsPublished = sender->isBridge() || options.getRetainAsPublished();
+        const bool mqtt3bridge = sender->getClientType() == ClientType::Mqtt3DefactoBridge;
+        const bool noLocal = mqtt3bridge || options.getNoLocal();
+        const bool retainedAsPublished = mqtt3bridge || options.getRetainAsPublished();
 
         std::vector<std::string> subtopics = splitTopic(topic);
 
@@ -1514,6 +1673,9 @@ void MqttPacket::parsePublishData()
         const size_t proplen = decodeVariableByteIntAtPos();
         const size_t prop_end_at = pos + proplen;
 
+        std::array<uint8_t, 8> pcounts;
+        pcounts.fill(0);
+
         while (pos < prop_end_at)
         {
             const Mqtt5Properties prop = static_cast<Mqtt5Properties>(readUint8());
@@ -1521,10 +1683,16 @@ void MqttPacket::parsePublishData()
             switch (prop)
             {
             case Mqtt5Properties::PayloadFormatIndicator:
+                if (pcounts[0]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 publishData.constructPropertyBuilder();
                 publishData.propertyBuilder->writePayloadFormatIndicator(readByte());
                 break;
             case Mqtt5Properties::MessageExpiryInterval:
+                if (pcounts[1]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 publishData.setExpireAfter(readFourBytesToUint32());
                 break;
             case Mqtt5Properties::TopicAlias:
@@ -1535,7 +1703,14 @@ void MqttPacket::parsePublishData()
                 if (!sender)
                     break;
 
+                if (pcounts[2]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 const uint16_t alias_id = readTwoBytesToUInt16();
+
+                if (alias_id == 0)
+                    throw ProtocolError("Topic alias ID 0 is invalid.", ReasonCodes::TopicAliasInvalid);
+
                 this->hasTopicAlias = true;
                 this->publishData.topicAlias = alias_id;
 
@@ -1552,6 +1727,9 @@ void MqttPacket::parsePublishData()
             }
             case Mqtt5Properties::ResponseTopic:
             {
+                if (pcounts[3]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 publishData.constructPropertyBuilder();
                 const std::string responseTopic = readBytesToString(true, true);
                 publishData.propertyBuilder->writeResponseTopic(responseTopic);
@@ -1559,6 +1737,9 @@ void MqttPacket::parsePublishData()
             }
             case Mqtt5Properties::CorrelationData:
             {
+                if (pcounts[4]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 publishData.constructPropertyBuilder();
                 const std::string correlationData = readBytesToString(false);
                 publishData.propertyBuilder->writeCorrelationData(correlationData);
@@ -1571,11 +1752,20 @@ void MqttPacket::parsePublishData()
             }
             case Mqtt5Properties::SubscriptionIdentifier:
             {
+                if (pcounts[5]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
+                if (sender->getClientType() != ClientType::LocalBridge)
+                    throw ProtocolError("Subscription identifiers cannot be sent to servers.", ReasonCodes::ProtocolError);
+
                 decodeVariableByteIntAtPos();
                 break;
             }
             case Mqtt5Properties::ContentType:
             {
+                if (pcounts[6]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 publishData.constructPropertyBuilder();
                 const uint16_t len = readTwoBytesToUInt16();
                 const std::string contentType(readBytes(len), len);
@@ -1634,12 +1824,17 @@ void MqttPacket::handlePublish()
         this->alteredByPlugin = authentication.alterPublish(this->publishData.client_id, this->publishData.topic, this->publishData.getSubtopics(),
                                                             getPayloadView(), this->publishData.qos, this->publishData.retain, this->publishData.getUserProperties());
 
+        if (this->alteredByPlugin)
+        {
+            this->publishData.resplitTopic();
+        }
+
         if (authentication.aclCheck(this->publishData, getPayloadView()) == AuthResult::success)
         {
             if (publishData.retain && settings->retainedMessagesMode == RetainedMessagesMode::Enabled)
             {
                 publishData.payload = getPayloadCopy();
-                MainApp::getMainApp()->getSubscriptionStore()->setRetainedMessage(publishData, publishData.getSubtopics());
+                MainApp::getMainApp()->getSubscriptionStore()->trySetRetainedMessages(publishData, publishData.getSubtopics());
             }
 
             if (!publishData.retain || settings->retainedMessagesMode <= RetainedMessagesMode::Downgrade)
@@ -1678,6 +1873,9 @@ void MqttPacket::parsePubAckData()
     setPosToDataStart();
     this->publishData.qos = 1;
     this->packet_id = readTwoBytesToUInt16();
+
+    // TODO: if we ever parse the reason code and use it to make decisions, check for validity. But, as of yet,
+    // checking validity would just add overhead for no reason.
 
     if (this->packet_id == 0)
         throw ProtocolError("QoS packets must have packet ID > 0.", ReasonCodes::ProtocolError);
@@ -1735,7 +1933,7 @@ void MqttPacket::handlePubRec()
 void MqttPacket::parsePubRelData()
 {
     // MQTT-3.6.1-1, but why do we care, and only care for certain control packets?
-    if (first_byte & 0b1101)
+    if ((first_byte & 0b00001111) != 0b00000010)
         throw ProtocolError("PUBREL first byte LSB must be 0010.", ReasonCodes::MalformedPacket);
 
     setPosToDataStart();
@@ -1797,6 +1995,9 @@ SubAckData MqttPacket::parseSubAckData()
         const size_t proplen = decodeVariableByteIntAtPos();
         const size_t prop_end_at = pos + proplen;
 
+        std::array<uint8_t, 1> pcounts;
+        pcounts.fill(0);
+
         while (pos < prop_end_at)
         {
             const Mqtt5Properties prop = static_cast<Mqtt5Properties>(readUint8());
@@ -1804,6 +2005,9 @@ SubAckData MqttPacket::parseSubAckData()
             switch (prop)
             {
             case Mqtt5Properties::ReasonString:
+                if (pcounts[0]++ > 0)
+                    throw ProtocolError("Can't specify " + propertyToString(prop) + " more than once", ReasonCodes::ProtocolError);
+
                 result.reasonString = readBytesToString();
                 break;
             case Mqtt5Properties::UserProperty:

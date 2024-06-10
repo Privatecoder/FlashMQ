@@ -15,6 +15,7 @@ See LICENSE for license details.
 #include <iostream>
 #include <cassert>
 #include <chrono>
+#include <netinet/tcp.h>
 
 #include "logger.h"
 #include "utils.h"
@@ -158,6 +159,12 @@ void Client::connectToBridgeTarget(FMQSockaddr_in6 addr)
 
     this->outgoingConnection = true;
 
+    if (bridge->c.tcpNoDelay)
+    {
+        int tcp_nodelay_optval = 1;
+        check<std::runtime_error>(setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &tcp_nodelay_optval, sizeof(tcp_nodelay_optval)));
+    }
+
     addr.setPort(bridge->c.port);
     int rc = connect(fd, addr.getSockaddr(), addr.getSize());
 
@@ -167,11 +174,9 @@ void Client::connectToBridgeTarget(FMQSockaddr_in6 addr)
            logger->logf(LOG_ERR, "Client connect error: %s", strerror(errno));
         return;
     }
+    assert(rc == 0);
 
-    if (rc == 0)
-    {
-        setBridgeConnected();
-    }
+    setBridgeConnected();
 }
 
 void Client::startOrContinueSslHandshake()
@@ -317,18 +322,39 @@ PacketDropReason Client::writeMqttPacket(const MqttPacket &packet)
 PacketDropReason Client::writeMqttPacketAndBlameThisClient(PublishCopyFactory &copyFactory, uint8_t max_qos, uint16_t packet_id, bool retain)
 {
     uint16_t topic_alias = 0;
+    uint16_t topic_alias_next = 0;
     bool skip_topic = false;
 
-    if (protocolVersion >= ProtocolVersion::Mqtt5 && this->maxOutgoingTopicAliasValue > this->curOutgoingTopicAlias)
+    /*
+     * Required for two reasons:
+     *
+     * 1) Upon first use of an alias, we need to hold the lock until we know the packet is actually not dropped.
+     * 2) Upon first use of an alias, we need to make sure another sender using the same topic won't get
+     *    their packet sent first.
+     *
+     * I'm not fully happy that by doing this, we'll be holding two mutexes at the same time: this one and the buffer
+     * write mutex, but it's OK for now. They are never locked in opposite order, so deadlocks shouldn't happen.
+     */
+    std::unique_lock<std::mutex> aliasMutexExtended;
+
+    if (protocolVersion >= ProtocolVersion::Mqtt5 && this->maxOutgoingTopicAliasValue > 0)
     {
-        uint16_t &id = this->outgoingTopicAliases[copyFactory.getTopic()];
+        std::unique_lock<std::mutex> aliasMutex(outgoingTopicAliasMutex);
 
-        if (id > 0)
+        auto alias_pos = this->outgoingTopicAliases.find(copyFactory.getTopic());
+
+        if (alias_pos != this->outgoingTopicAliases.end())
+        {
+            topic_alias = alias_pos->second;
             skip_topic = true;
-        else
-            id = ++this->curOutgoingTopicAlias;
+        }
+        else if (this->curOutgoingTopicAlias < this->maxOutgoingTopicAliasValue)
+        {
+            topic_alias_next = this->curOutgoingTopicAlias + 1;
+            topic_alias = topic_alias_next;
 
-        topic_alias = id;
+            aliasMutexExtended = std::move(aliasMutex);
+        }
     }
 
     MqttPacket *p = copyFactory.getOptimumPacket(max_qos, this->protocolVersion, topic_alias, skip_topic);
@@ -345,7 +371,15 @@ PacketDropReason Client::writeMqttPacketAndBlameThisClient(PublishCopyFactory &c
 
     p->setRetain(retain);
 
-    return writeMqttPacketAndBlameThisClient(*p);
+    PacketDropReason dropReason = writeMqttPacketAndBlameThisClient(*p);
+
+    if (dropReason == PacketDropReason::Success && topic_alias_next > 0)
+    {
+        this->outgoingTopicAliases[copyFactory.getTopic()] = topic_alias_next;
+        this->curOutgoingTopicAlias = topic_alias_next;
+    }
+
+    return dropReason;
 }
 
 // Helper method to avoid the exception ending up at the sender of messages, which would then get disconnected.
@@ -448,7 +482,12 @@ const sockaddr *Client::getAddr() const
 
 std::string Client::repr()
 {
-    const std::string bridge = isBridge() ? "Bridge " : "";
+    std::string bridge;
+
+    if (clientType == ClientType::Mqtt3DefactoBridge)
+        bridge = "Mqtt3Bridge ";
+    else if (clientType == ClientType::LocalBridge)
+        bridge = "LocalBridge ";
 
     std::string s = formatString("[%sClientID='%s', username='%s', fd=%d, keepalive=%ds, transport='%s', address='%s', prot=%s, clean=%d]",
                                  bridge.c_str(), clientid.c_str(), username.c_str(), fd, keepalive, this->transportStr.c_str(), this->address.c_str(),
@@ -521,9 +560,14 @@ void Client::setTopicAlias(const uint16_t alias_id, const std::string &topic)
     this->incomingTopicAliases[alias_id] = topic;
 }
 
-const std::string &Client::getTopicAlias(const uint16_t id)
+const std::string &Client::getTopicAlias(const uint16_t id) const
 {
-    return this->incomingTopicAliases[id];
+    auto pos = this->incomingTopicAliases.find(id);
+
+    if (pos == this->incomingTopicAliases.end())
+        throw ProtocolError("Requesting topic alias ID (" + std::to_string(id) + ") that wasn't set before.", ReasonCodes::TopicAliasInvalid);
+
+    return pos->second;
 }
 
 /**
@@ -679,7 +723,7 @@ void Client::setBridgeState(std::shared_ptr<BridgeState> bridgeState)
 {
     this->bridgeState = bridgeState;
     this->outgoingConnection = true;
-    setBridge(true);
+    this->clientType = ClientType::LocalBridge;
 
     if (bridgeState)
     {
@@ -733,14 +777,14 @@ bool Client::getOutgoingConnectionEstablished() const
     return this->outgoingConnectionEstablished;
 }
 
-void Client::setBridge(bool val)
+void Client::setClientType(ClientType val)
 {
-    this->bridge = val;
+    this->clientType = val;
 
     if (!session)
         return;
 
-    session->setBridge(val);
+    session->setClientType(val);
 }
 
 #ifndef NDEBUG
@@ -936,14 +980,14 @@ void Client::setDisconnectReason(const std::string &reason)
  */
 std::chrono::seconds Client::getSecondsTillKeepAliveAction() const
 {
+    if (isOutgoingConnection())
+        return std::chrono::seconds(this->keepalive);
+
     if (!this->authenticated)
         return std::chrono::seconds(30);
 
     if (this->keepalive == 0)
         return std::chrono::seconds(0);
-
-    if (isOutgoingConnection())
-        return std::chrono::seconds(this->keepalive);
 
     const uint32_t timeOfSilenceMeansKill = this->keepalive + (this->keepalive / 2) + 2;
     std::chrono::time_point<std::chrono::steady_clock> killTime = this->lastActivity + std::chrono::seconds(timeOfSilenceMeansKill);

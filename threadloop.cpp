@@ -95,6 +95,18 @@ void do_thread_work(ThreadData *threadData)
                     }
                 }
 
+                try
+                {
+                    threadData->setQueuedRetainedMessages();
+                }
+                catch (std::exception &ex)
+                {
+                    Logger *logger = Logger::getInstance();
+                    logger->log(LOG_ERR) << "Error in setting queued retained messages: " << ex.what() << ". This shouldn't "
+                                         << "happen and is likely a bug. Clearing the queue for safety.";
+                    threadData->clearQueuedRetainedMessages();
+                }
+
                 continue;
             }
 
@@ -245,7 +257,7 @@ void do_thread_work(ThreadData *threadData)
             catch(std::exception &ex)
             {
                 client->setDisconnectReason(ex.what());
-                logger->logf(LOG_ERR, "Packet read/write error: %s. Removing client.", ex.what());
+                logger->log(LOG_ERR) << "Packet read/write error: " << ex.what() << ". Removing client " << client->repr();
                 threadData->removeClient(client);
             }
         }

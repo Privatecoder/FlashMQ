@@ -33,6 +33,14 @@ AsyncAuth::AsyncAuth(std::weak_ptr<Client> client, AuthResult result, const std:
 
 }
 
+QueuedRetainedMessage::QueuedRetainedMessage(const Publish &p, const std::vector<std::string> &subtopics, const std::chrono::time_point<std::chrono::steady_clock> limit) :
+    p(p),
+    subtopics(subtopics),
+    limit(limit)
+{
+
+}
+
 ThreadData::ThreadData(int threadnr, const Settings &settings, const PluginLoader &pluginLoader) :
     pluginLoader(pluginLoader),
     settingsLocalCopy(settings),
@@ -47,11 +55,22 @@ ThreadData::ThreadData(int threadnr, const Settings &settings, const PluginLoade
     if (taskEventFd < 0)
         throw std::runtime_error("Can't create eventfd.");
 
+    randomish.seed(get_random_int<unsigned long>());
+
     struct epoll_event ev;
     memset(&ev, 0, sizeof (struct epoll_event));
     ev.data.fd = taskEventFd;
     ev.events = EPOLLIN;
     check<std::runtime_error>(epoll_ctl(this->epollfd, EPOLL_CTL_ADD, taskEventFd, &ev));
+}
+
+ThreadData::~ThreadData()
+{
+    if (taskEventFd >= 0)
+        close(taskEventFd);
+
+    if (epollfd >= 0)
+        close(epollfd);
 }
 
 void ThreadData::start(thread_f f)
@@ -272,8 +291,13 @@ void ThreadData::bridgeReconnect()
 
     bool requeue = false;
 
-    for (std::shared_ptr<BridgeState> &bridge : bridges)
+    for (auto &pair : bridges)
     {
+        std::shared_ptr<BridgeState> bridge = pair.second;
+
+        if (!bridge)
+            continue;
+
         try
         {
             bridge->initSSL(false);
@@ -357,8 +381,7 @@ void ThreadData::bridgeReconnect()
             ev.events = EPOLLIN | EPOLLOUT;
             check<std::runtime_error>(epoll_ctl(epollfd, EPOLL_CTL_ADD, sockfd, &ev));
 
-            // Perform one keep-alive check, for the pre-auth stage. The repeating once are done in processing the connack.
-            queueClientNextKeepAliveCheckLocked(c, false);
+            queueClientNextKeepAliveCheckLocked(c, true);
 
             if (session)
             {
@@ -505,6 +528,14 @@ void ThreadData::publishStatsOnDollarTopic(std::vector<std::shared_ptr<ThreadDat
 
         aclRegisterWillChecksPerSecond += thread->aclRegisterWillChecks.getPerSecond();
         aclRegisterWillCheckCount += thread->aclRegisterWillChecks.get();
+
+        publishStat("$SYS/broker/threads/" + std::to_string(thread->threadnr) + "/drift/latest__ms", thread->driftCounter.getDrift().count());
+        publishStat("$SYS/broker/threads/" + std::to_string(thread->threadnr) + "/drift/moving_avg__ms", thread->driftCounter.getAvgDrift().count());
+
+        publishStat("$SYS/broker/threads/" + std::to_string(thread->threadnr) + "/retained_deferrals/count", thread->deferredRetainedMessagesSet.get());
+        publishStat("$SYS/broker/threads/" + std::to_string(thread->threadnr) + "/retained_deferrals/persecond", thread->deferredRetainedMessagesSet.getPerSecond());
+        publishStat("$SYS/broker/threads/" + std::to_string(thread->threadnr) + "/retained_deferrals/timeout/count", thread->deferredRetainedMessagesSetTimeout.get());
+        publishStat("$SYS/broker/threads/" + std::to_string(thread->threadnr) + "/retained_deferrals/timeout/persecond", thread->deferredRetainedMessagesSetTimeout.getPerSecond());
     }
 
     GlobalStats *globalStats = GlobalStats::getInstance();
@@ -573,6 +604,17 @@ void ThreadData::publishBridgeState(std::shared_ptr<BridgeState> bridge, bool co
 
     Publish p(topic, payload, 0);
     publishWithAcl(p, true);
+}
+
+void ThreadData::queueSettingRetainedMessage(const Publish &p, const std::vector<std::string> &subtopics, const std::chrono::time_point<std::chrono::steady_clock> limit)
+{
+    assert(pthread_self() == thread.native_handle());
+    const bool wakeup_required = this->queuedRetainedMessages.empty();
+    this->queuedRetainedMessages.emplace_front(p, subtopics, limit);
+    this->deferredRetainedMessagesSet.inc(1);
+
+    if (wakeup_required)
+        wakeUpThread();
 }
 
 void ThreadData::publishWithAcl(Publish &pub, bool setRetain)
@@ -694,8 +736,12 @@ void ThreadData::removeQueuedClients()
         std::lock_guard<std::mutex> lck(clients_by_fd_mutex);
         for(const std::shared_ptr<Client> &client : clients)
         {
-            int fd = client->getFd();
-            clients_by_fd.erase(fd);
+            const int fd = client->getFd();
+            auto pos = clients_by_fd.find(fd);
+            if (pos != clients_by_fd.end() && pos->second == client)
+            {
+                clients_by_fd.erase(pos);
+            }
         }
     }
 }
@@ -704,6 +750,7 @@ void ThreadData::giveClient(std::shared_ptr<Client> &&client)
 {
     const int fd = client->getFd();
 
+    // A non-repeating keep-alive check is for when clients do a TCP connect and then nothing else.
     queueClientNextKeepAliveCheckLocked(client, false);
 
     {
@@ -718,12 +765,141 @@ void ThreadData::giveClient(std::shared_ptr<Client> &&client)
     check<std::runtime_error>(epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev));
 }
 
-void ThreadData::giveBridge(std::shared_ptr<BridgeState> &bridgeConfig)
+void ThreadData::giveBridge(std::shared_ptr<BridgeState> &bridgeState)
 {
+    if (!bridgeState)
+        return;
+
+    std::lock_guard<std::mutex> locker(clients_by_fd_mutex);
+
+    auto pos = bridges.find(bridgeState->c.clientidPrefix);
+
+    if (pos != bridges.end())
     {
-        std::lock_guard<std::mutex> locker(clients_by_fd_mutex);
-        bridges.push_back(bridgeConfig);
+        std::shared_ptr<BridgeState> &existingState = pos->second;
+
+        if (!existingState)
+            existingState = bridgeState;
+        else
+        {
+            if (existingState->c != bridgeState->c)
+            {
+                logger->log(LOG_NOTICE) << "Bridge '" << existingState->c.clientidPrefix << "' has changed. Reconnecting.";
+                existingState = bridgeState;
+            }
+        }
     }
+    else
+    {
+        bridges[bridgeState->c.clientidPrefix] = bridgeState;
+    }
+}
+
+void ThreadData::removeBridgeQueued(std::shared_ptr<BridgeConfig> bridgeConfig, const std::string &reason)
+{
+    auto f = std::bind(&ThreadData::removeBridge, this, bridgeConfig, reason);
+    std::lock_guard<std::mutex> lockertaskQueue(taskQueueMutex);
+    taskQueue.push_back(f);
+    wakeUpThread();
+}
+
+void ThreadData::removeBridge(std::shared_ptr<BridgeConfig> bridgeConfig, const std::string &reason)
+{
+    if (!bridgeConfig)
+        return;
+
+    std::lock_guard<std::mutex> locker(clients_by_fd_mutex);
+
+    auto pos = bridges.find(bridgeConfig->clientidPrefix);
+
+    if (pos == bridges.end())
+        return;
+
+    std::shared_ptr<BridgeState> bridge = pos->second;
+    bridges.erase(pos);
+
+    if (!bridge)
+        return;
+
+    std::shared_ptr<Session> session = bridge->session.lock();
+
+    if (!session)
+        return;
+
+    std::shared_ptr<Client> client = session->makeSharedClient();
+
+    if (!client)
+        return;
+
+    if (!reason.empty())
+        client->setDisconnectReason(reason);
+
+    publishBridgeState(bridge, false);
+    removeClientQueued(client);
+}
+
+void ThreadData::setQueuedRetainedMessages()
+{
+    if (this->queuedRetainedMessages.empty())
+        return;
+
+    std::shared_ptr<SubscriptionStore> store = MainApp::getMainApp()->getSubscriptionStore();
+
+    if (!store)
+        return;
+
+    auto _pos = this->queuedRetainedMessages.begin();
+    while (_pos != this->queuedRetainedMessages.end())
+    {
+        auto cur = _pos;
+        _pos++;
+
+        const bool try_lock_fail = cur->limit > std::chrono::steady_clock::now();
+
+        if (!try_lock_fail)
+        {
+            deferredRetainedMessagesSetTimeout.inc(1);
+        }
+
+        if (store->setRetainedMessage(cur->p, cur->subtopics, try_lock_fail))
+        {
+            this->queuedRetainedMessages.erase(cur);
+            continue;
+        }
+        else
+        {
+            wakeUpThread();
+            return;
+        }
+    }
+}
+
+bool ThreadData::queuedRetainedMessagesEmpty() const
+{
+    return queuedRetainedMessages.empty();
+}
+
+void ThreadData::clearQueuedRetainedMessages()
+{
+    queuedRetainedMessages.clear();
+}
+
+void ThreadData::queueInternalHeartbeat()
+{
+    auto f = [this](std::chrono::time_point<std::chrono::steady_clock> t){
+        this->driftCounter.update(t);
+
+        if (this->driftCounter.getDrift() > settingsLocalCopy.maxEventLoopDrift)
+            Logger::getInstance()->log(LOG_WARNING) << "Thread " << threadnr << " drift is: " << this->driftCounter.getDrift().count() << " ms";
+    };
+
+    {
+        auto bound = std::bind(f, std::chrono::steady_clock::now());
+        std::lock_guard<std::mutex> locker(taskQueueMutex);
+        taskQueue.push_back(bound);
+    }
+
+    wakeUpThread();
 }
 
 std::shared_ptr<Client> ThreadData::getClient(int fd)
@@ -740,6 +916,10 @@ std::shared_ptr<Client> ThreadData::getClient(int fd)
 
 void ThreadData::removeClientQueued(const std::shared_ptr<Client> &client)
 {
+    // This is for same-thread calling, to avoid the calling thread to be slower and ending up with
+    // the last reference on the shared pointer to client.
+    assert(pthread_self() == thread.native_handle());
+
     bool wakeUpNeeded = true;
 
     {
@@ -777,7 +957,7 @@ void ThreadData::removeClientQueued(int fd)
         {
             std::lock_guard<std::mutex> locker(clientsToRemoveMutex);
             wakeUpNeeded = clientsQueuedForRemoving.empty();
-            clientsQueuedForRemoving.push_front(clientFound);
+            clientsQueuedForRemoving.push_front(std::move(clientFound));
         }
 
         if (wakeUpNeeded)
@@ -796,10 +976,15 @@ void ThreadData::removeClient(std::shared_ptr<Client> client)
     // This function is only for same-thread calling.
     assert(pthread_self() == thread.native_handle());
 
+    if (!client)
+        return;
+
     client->markAsDisconnecting();
 
     std::lock_guard<std::mutex> lck(clients_by_fd_mutex);
-    clients_by_fd.erase(client->getFd());
+    auto pos = clients_by_fd.find(client->getFd());
+    if (pos != clients_by_fd.end() && pos->second == client)
+        clients_by_fd.erase(pos);
 }
 
 void ThreadData::queueDoKeepAliveCheck()
@@ -978,7 +1163,7 @@ void ThreadData::doKeepAliveCheck()
                     {
                         clientsChecked++;
 
-                        if (client->isOutgoingConnection())
+                        if (client->isOutgoingConnection() && client->getAuthenticated())
                         {
                             client->writePing();
                         }
@@ -1045,8 +1230,13 @@ void ThreadData::reload(const Settings &settings)
         // Because the auth plugin has a reference to it, it will also be updated.
         settingsLocalCopy = settings;
 
-        for (auto b : this->bridges)
+        for (auto &pair : this->bridges)
         {
+            std::shared_ptr<BridgeState> b = pair.second;
+
+            if (!b)
+                continue;
+
             b->initSSL(true);
         }
 

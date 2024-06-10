@@ -13,9 +13,14 @@ See LICENSE for license details.
 #include <iomanip>
 #include <string.h>
 #include <functional>
+#include <mutex>
 
-#include "exceptions.h"
+#include "threaddata.h"
+#include "threadglobals.h"
 #include "utils.h"
+
+Logger* Logger::instance = nullptr;
+std::mutex Logger::instanceMutex;
 
 LogLine::LogLine(std::string &&line, bool alsoToStdOut) :
     line(std::move(line)),
@@ -100,8 +105,27 @@ std::string_view Logger::getLogLevelString(int level)
 
 Logger *Logger::getInstance()
 {
-    static Logger instance;
-    return &instance;
+    // Prevent duplicate creation without always needing the mutex.
+    if (instance == nullptr)
+    {
+        std::lock_guard<std::mutex> locker(instanceMutex);
+        if (instance == nullptr)
+            instance = new Logger();
+    }
+    return instance;
+}
+
+/**
+ * @brief Logger::stopAndReset was created for the test binary. Normally you shouldn't use this. It's also not thread-safe (it's raw pointer, not
+ * a smart pointer).
+ */
+void Logger::stopAndReset()
+{
+    std::lock_guard<std::mutex> locker(instanceMutex);
+
+    instance->quit();
+    delete instance;
+    instance = nullptr;
 }
 
 void Logger::logf(int level, const char *str, ...)
@@ -287,9 +311,20 @@ void Logger::writeLog()
 
 std::string Logger::getPrefix(int level)
 {
+    int threadnr = -1;
+    const ThreadData *td = ThreadGlobals::getThreadData();
+    if (td)
+        threadnr = td->threadnr;
+
     std::ostringstream oss;
     const std::string stamp = timestampWithMillis();
     oss << "[" << stamp << "] [" << getLogLevelString(level) << "] ";
+
+    if (threadnr == -1)
+        oss << "[main] ";
+    else
+        oss << "[T " << threadnr << "] ";
+
     std::string result = oss.str();
     return result;
 }

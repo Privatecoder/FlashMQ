@@ -16,6 +16,10 @@
   encoding="UTF-8"
   indent="yes"/>
 
+  <xsl:param name="dbk5.reference"/>
+
+  <xsl:variable name="reference" select="document($dbk5.reference)/dbk:reference"/>
+
   <xsl:template match="/">
     <html>
       <xsl:apply-templates select="/dbk:*/@xml:lang"/>
@@ -193,6 +197,8 @@
     </body>
   </xsl:template>
 
+  <xsl:template match="dbk:info"/>
+
   <xsl:template match="dbk:refsynopsisdiv">
     <section class="refsynopsisdiv">
       <xsl:apply-templates select="@*"/>
@@ -303,7 +309,7 @@
           <xsl:value-of select="@role"/>
         </xsl:if>
       </xsl:attribute>
-      <xsl:apply-templates select="@*[local-name() != 'class'] | node()"/>
+      <xsl:apply-templates select="text()"/>
     </pre>
   </xsl:template>
 
@@ -363,7 +369,15 @@
     </strong>
   </xsl:template>
 
-  <xsl:template match="dbk:filename | dbk:command | dbk:literal | dbk:systemitem | dbk:property | dbk:function | dbk:userinput | dbk:code | dbk:replaceable | dbk:option" name="monospace">
+  <xsl:template match="dbk:citetitle">
+    <cite>
+      <xsl:apply-templates select="@* | node()"/>
+    </cite>
+  </xsl:template>
+
+  <xsl:template match="dbk:citetitle/@pubwork"/>
+
+  <xsl:template match="dbk:filename | dbk:command | dbk:literal | dbk:systemitem | dbk:property | dbk:function | dbk:userinput | dbk:code | dbk:replaceable | dbk:option | dbk:symbol | dbk:envvar" name="monospace">
     <code>
       <xsl:attribute name="class">
         <xsl:value-of select="local-name(.)"/>
@@ -393,6 +407,30 @@
   </xsl:template>
 
   <xsl:template match="dbk:citerefentry">
+    <xsl:variable name="refentry" select="$reference/dbk:refentry[dbk:refmeta/dbk:refentrytitle/text() = current()/dbk:refentrytitle/text() and dbk:refmeta/dbk:manvolnum/text()=current()/dbk:manvolnum/text()]"/>
+    <!--<xsl:variable name="refentry" select="$reference/dbk:refentry[dbk:refmeta/dbk:refname/text()=current()/dbk:refentrytitle/text()]"/>-->
+    <xsl:choose>
+      <xsl:when test="$refentry">
+        <xsl:if test="not($refentry/dbk:info/dbk:biblioid[@class='uri'])">
+          <xsl:message terminate="yes">
+            <xsl:text>refentry/info/biblioid[@class='uri'] missing in source DocBook for man:</xsl:text>
+            <xsl:value-of select="concat(dbk:refentrytitle, '(', dbk:manvolnum, ')')"/>
+          </xsl:message>
+        </xsl:if>
+        <a>
+          <xsl:attribute name="href">
+            <xsl:value-of select="$refentry/dbk:info/dbk:biblioid[@class='uri']"/>
+          </xsl:attribute>
+          <xsl:apply-templates select="." mode="content"/>
+        </a>
+      </xsl:when>
+      <xsl:otherwise>
+        <xsl:apply-templates select="." mode="content"/>
+      </xsl:otherwise>
+    </xsl:choose>
+  </xsl:template>
+
+  <xsl:template match="dbk:citerefentry" mode="content">
     <cite class="citerefentry">
       <span class="refentrytitle">
         <xsl:value-of select="dbk:refentrytitle"/>
@@ -405,7 +443,19 @@
     </cite>
   </xsl:template>
 
-  <xsl:template match="dbk:simplelist[@type='inline']">
+  <xsl:template match="dbk:itemizedlist | dbk:simplelist[@type='vert' or not(@type)]">
+    <ul>
+      <xsl:apply-templates select="node()"/>
+    </ul>
+  </xsl:template>
+
+  <xsl:template match="dbk:itemizedlist/dbk:listitem | dbk:simplelist[@type='vert' or not(@type)]/dbk:member">
+    <li>
+      <xsl:apply-templates select="node()"/>
+    </li>
+  </xsl:template>
+
+  <xsl:template match="dbk:simplelist[@type='inline' or @type='horiz']">
     <span class="simplelist inline">
       <xsl:apply-templates select="@*[local-name != 'inline']"/>
       <xsl:apply-templates select="node()"/>
@@ -421,5 +471,15 @@
     <span class="member">
       <xsl:apply-templates select="node()"/>
     </span>
+  </xsl:template>
+
+  <xsl:template match="dbk:*[@outputformat][not(@outputformat='html')]"/>
+
+  <xsl:template match="dbk:*">
+    <xsl:message terminate="no">
+      <xsl:text>DocBook element unrecognized by XSLT: &lt;</xsl:text>
+      <xsl:value-of select="name(.)"/>
+      <xsl:text>&gt;</xsl:text>
+    </xsl:message>
   </xsl:template>
 </xsl:stylesheet>

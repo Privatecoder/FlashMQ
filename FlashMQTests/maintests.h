@@ -8,6 +8,15 @@
 #include "mainappinthread.h"
 
 #define REGISTER_FUNCTION(name) registerFunction(#name, std::bind(&MainTests::name, this))
+#define REGISTER_FUNCTION2(name, server, internet) registerFunction(#name, std::bind(&MainTests::name, this), server, internet)
+#define REGISTER_FUNCTION3(name) registerFunction(#name, std::bind(&MainTests::name, this), false, false)
+
+struct TestFunction
+{
+    std::function<void()> f;
+    bool requiresServer = true;
+    bool requiresInternet = false;
+};
 
 class MainTests
 {
@@ -15,15 +24,16 @@ class MainTests
 
     std::unique_ptr<MainAppInThread> mainApp;
     std::shared_ptr<ThreadData> dummyThreadData;
+    Settings settings;
 
-    std::unordered_map<std::string, std::function<void()>> testFunctions;
+    std::map<std::string, TestFunction> testFunctions;
 
     void testAsserts();
 
-    void initBeforeEachTest(const std::vector<std::string> &args);
-    void initBeforeEachTest();
+    void initBeforeEachTest(const std::vector<std::string> &args, bool startServer=true);
+    void initBeforeEachTest(bool startServer=true);
     void cleanupAfterEachTest();
-    void registerFunction(const std::string &name, std::function<void()> f);
+    void registerFunction(const std::string &name, std::function<void ()> f, bool requiresServer=true, bool requiresInternet=false);
 
     // Compatability for porting the tests away from Qt. The function names are too vague so want to phase them out.
     void init(const std::vector<std::string> &args) { initBeforeEachTest(args);}
@@ -90,6 +100,7 @@ class MainTests
     void testSavingSessions();
 
     void testParsePacket();
+    void testbufferToMqttPacketsFuzz();
 
     void testDowngradeQoSOnSubscribeQos2to2();
     void testDowngradeQoSOnSubscribeQos2to1();
@@ -120,10 +131,13 @@ class MainTests
     void testOverrideWillDelayOnSessionDestructionByTakeOver();
     void testDisabledWills();
     void testMqtt5DelayedWillsDisabled();
+    void testStringDistances();
+    void testConfigSuggestion();
 
 
     void testIncomingTopicAlias();
     void testOutgoingTopicAlias();
+    void testOutgoingTopicAliasBeyondMax();
     void testOutgoingTopicAliasStoredPublishes();
 
     void testReceivingRetainedMessageWithQoS();
@@ -203,11 +217,21 @@ class MainTests
     void testWebsocketManyBigPingFrames();
     void testWebsocketClose();
 
+    void testStartsWith();
+
+    void forkingTestForkingTestServer();
+
+    void testStringValuesParsing();
+    void testStringValuesParsingEscaping();
+    void testStringValuesFuzz();
+    void testStringValuesInvalid();
+    void testPreviouslyValidConfigFile();
+
 
 public:
     MainTests();
 
-    bool test(const std::vector<std::string> &tests);
+    bool test(bool skip_tests_with_internet, bool skip_server_tests, const std::vector<std::string> &tests);
 };
 
 #endif // MAINTESTS_H
