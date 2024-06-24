@@ -136,10 +136,7 @@ multi-value-param one 'two' "three" "with ' char"
         <term><option>log_file</option> <filename>/path/to/flashmq.log</filename></term>
         <listitem>
           <para>
-            This configuration parameter sets the path to FlashMQ's log file. If you omit the, the output will go to stdout.
-          </para>
-          <para>
-            Default value: <filename>/var/log/flashmq/flashmq.log</filename>
+            This configuration parameter sets the path to FlashMQ's log file. If you omit this option from the config file, the output will go to stdout.
           </para>
         </listitem>
       </varlistentry>
@@ -347,6 +344,20 @@ multi-value-param one 'two' "three" "with ' char"
           </para>
         </listitem>
       </varlistentry>
+      <varlistentry xml:id="save_state_interval">
+        <term><option>save_state_interval</option> <replaceable>seconds</replaceable></term>
+        <listitem>
+          <para>
+            The interval at which the state is saved, if enabled with <option>storage_dir</option>.
+          </para>
+          <para>
+            This setting is currently not applied on reload.
+          </para>
+          <para>
+            Default: 3623
+          </para>
+        </listitem>
+      </varlistentry>
       <varlistentry>
         <term xml:id="max_qos_msg_pending_per_client"><option>max_qos_msg_pending_per_client</option></term>
         <term xml:id="max_qos_bytes_pending_per_client"><option>max_qos_bytes_pending_per_client</option></term>
@@ -418,13 +429,16 @@ multi-value-param one 'two' "three" "with ' char"
       </varlistentry>
 
       <varlistentry xml:id="retained_messages_mode">
-        <term><option>retained_messages_mode</option> <replaceable>enabled/downgrade/drop/disconnect_with_error</replaceable></term>
+        <term><option>retained_messages_mode</option> <replaceable>enabled/enabled_without_persistence/downgrade/drop/disconnect_with_error</replaceable></term>
         <listitem>
           <para>
             Retained messages can be a strain on the server you may not need. You can set various ways of dealing with them:
           </para>
           <para>
             <filename>enabled</filename>. This is normal operation.
+          </para>
+          <para>
+            <filename>enabled_without_persistence</filename>. Like 'normal', except it won't store them to disk if <option>storage_dir</option> is defined.
           </para>
           <para>
             <filename>downgrade</filename>. The retain flag is removed and treated like a normal publish.
@@ -524,6 +538,21 @@ multi-value-param one 'two' "three" "with ' char"
           </para>
           <para>
             Default value: <filename>0</filename>
+          </para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry xml:id="subscription_node_lifetime">
+        <term><option>subscription_node_lifetime</option> <replaceable>seconds</replaceable></term>
+        <listitem>
+          <para>
+            The grace period after which a subscription node is eligible for deletion. The subscription 'one/two/three' is three nodes.
+          </para>
+          <para>
+            FlashMQ will periodically clear our nodes in the subscription tree that have no entries anymore. This is required to save memory. But, when clients place the same subscriptions repeatedly, it may be beneficial to keep the nodes around, to avoid the need for locks to recreate them. If you know that certain subscription patterns come and go within a certain period, it's benificial to set this value so that no unnecessary node destruction and creation takes place.
+          </para>
+          <para>
+            Default value: <filename>3600</filename>
           </para>
         </listitem>
       </varlistentry>

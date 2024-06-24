@@ -28,6 +28,7 @@ See LICENSE for license details.
 enum class RetainedMessagesMode
 {
     Enabled,
+    EnabledWithoutPersistence,
     Downgrade,
     Drop,
     DisconnectWithError
@@ -97,6 +98,7 @@ public:
     uint maxQosBytesPendingPerClient = 65536;
     bool willsEnabled = true;
     uint32_t retainedMessagesDeliveryLimit = 2048;
+    std::chrono::seconds subscriptionNodeLifetime = std::chrono::seconds(3600);
     uint32_t retainedMessagesNodeLimit = std::numeric_limits<uint32_t>::max();
     std::chrono::seconds retainedMessageNodeLifetime = std::chrono::seconds(0);
     RetainedMessagesMode retainedMessagesMode = RetainedMessagesMode::Enabled;
@@ -108,6 +110,7 @@ public:
     OverloadMode overloadMode = OverloadMode::Log;
     std::chrono::milliseconds setRetainedMessageDeferTimeout = std::chrono::milliseconds(0);
     std::chrono::milliseconds setRetainedMessageDeferTimeoutSpread = std::chrono::milliseconds(1000);
+    std::chrono::seconds saveStateInterval = std::chrono::seconds(3623);
     std::list<std::shared_ptr<Listener>> listeners; // Default one is created later, when none are defined.
 
     std::list<Network> setRealIpFrom;

@@ -18,7 +18,9 @@ See LICENSE for license details.
 #include "plugin.h"
 #include "settings.h"
 
-Session::Session()
+Session::Session(const std::string &clientid, const std::string &username) :
+    client_id(clientid),
+    username(username)
 {
     const Settings &settings = *ThreadGlobals::getSettings();
 
@@ -46,28 +48,6 @@ void Session::clearExpiredMessagesFromQueue()
 
     const int n = this->qosPacketQueue.clearExpiredMessages();
     increaseFlowControlQuota(n);
-}
-
-bool Session::requiresQoSQueueing() const
-{
-    const std::shared_ptr<Client> client = makeSharedClient();
-
-    if (!client)
-        return true;
-
-    /*
-     * MQTT 3.1: "Brokers, however, should retry any unacknowledged message."
-     * MQTT 3.1.1: "This [reconnecting] is the only circumstance where a Client or Server is REQUIRED to redeliver messages."
-     *
-     * I disabled it, because MQTT 3.1 retransmission has not been implemented on purpose, because it's a legacy idea that
-     * doesn't work well in practice.
-     */
-    /*
-    if (client->getProtocolVersion() < ProtocolVersion::Mqtt311)
-        return true;
-    */
-
-    return !destroyOnDisconnect;
 }
 
 /**
@@ -98,18 +78,31 @@ Session::~Session()
  * typically, this method is called from other client's threads to perform writes, so you have to check validity after
  * obtaining the shared pointer.
  */
-std::shared_ptr<Client> Session::makeSharedClient() const
+std::shared_ptr<Client> Session::makeSharedClient()
 {
     return client.lock();
 }
 
-void Session::assignActiveConnection(std::shared_ptr<Client> &client)
+void Session::assignActiveConnection(const std::shared_ptr<Client> &client)
 {
     this->client = client;
-    this->client_id = client->getClientId();
-    this->username = client->getUsername();
     this->willPublish = client->getWill();
     this->removalQueued = false;
+}
+
+void Session::assignActiveConnection(const std::shared_ptr<Session> &thisSession, const std::shared_ptr<Client> &client,
+                                     uint16_t clientReceiveMax, uint32_t sessionExpiryInterval, bool clean_start, ProtocolVersion protocol_version)
+{
+    assert(this == thisSession.get());
+
+    std::lock_guard<std::mutex> locker(this->clientSwitchMutex);
+
+    if (username != client->getUsername())
+        throw ProtocolError("Cannot take over session with different username", ReasonCodes::NotAuthorized);
+
+    thisSession->assignActiveConnection(client);
+    client->assignSession(thisSession);
+    thisSession->setSessionProperties(clientReceiveMax, sessionExpiryInterval, clean_start, client->getProtocolVersion());
 }
 
 /**
@@ -122,18 +115,17 @@ void Session::assignActiveConnection(std::shared_ptr<Client> &client)
  */
 PacketDropReason Session::writePacket(PublishCopyFactory &copyFactory, const uint8_t max_qos, bool retainAsPublished)
 {
-    assert(max_qos <= 2);
+    /*
+     * We want to do as little as possible before the ACL check, because it's code that's called
+     * exponentially for subscribers that don't have access to topics, like wildcard subscribers.
+     */
 
-    const std::shared_ptr<Client> c = makeSharedClient();
+    assert(max_qos <= 2);
 
     const uint8_t effectiveQos = copyFactory.getEffectiveQos(max_qos);
     retainAsPublished = retainAsPublished || clientType == ClientType::Mqtt3DefactoBridge;
     bool effectiveRetain = copyFactory.getEffectiveRetain(retainAsPublished);
 
-    if (c && !c->isRetainedAvailable())
-        effectiveRetain = false;
-
-    const Settings *settings = ThreadGlobals::getSettings();
     Authentication *auth = ThreadGlobals::getAuth();
     assert(auth);
 
@@ -145,10 +137,13 @@ PacketDropReason Session::writePacket(PublishCopyFactory &copyFactory, const uin
         return PacketDropReason::AuthDenied;
     }
 
+    const std::shared_ptr<Client> c = makeSharedClient();
+
     uint16_t pack_id = 0;
 
     if (__builtin_expect(effectiveQos > 0, 0))
     {
+        const Settings *settings = ThreadGlobals::getSettings();
         std::unique_lock<std::mutex> locker(qosQueueMutex);
 
         // We don't clear expired messages for online clients. It would slow down the 'happy flow' and those packets are already in the output
@@ -172,7 +167,7 @@ PacketDropReason Session::writePacket(PublishCopyFactory &copyFactory, const uin
 
         pack_id = getNextPacketId();
 
-        if (requiresQoSQueueing())
+        if (!destroyOnDisconnect)
             qosPacketQueue.queuePublish(copyFactory, pack_id, effectiveQos, effectiveRetain);
     }
 
@@ -180,6 +175,9 @@ PacketDropReason Session::writePacket(PublishCopyFactory &copyFactory, const uin
 
     if (c)
     {
+        if (!c->isRetainedAvailable())
+            effectiveRetain = false;
+
         return_value = c->writeMqttPacketAndBlameThisClient(copyFactory, effectiveQos, pack_id, effectiveRetain);
     }
 
@@ -201,7 +199,7 @@ bool Session::clearQosMessage(uint16_t packet_id, bool qosHandshakeEnds)
     bool result = false;
 
     std::lock_guard<std::mutex> locker(qosQueueMutex);
-    if (requiresQoSQueueing())
+    if (!destroyOnDisconnect)
         result = qosPacketQueue.erase(packet_id);
     else
     {
@@ -237,7 +235,7 @@ void Session::sendAllPendingQosData()
     std::shared_ptr<Client> c = makeSharedClient();
     if (c)
     {
-        std::vector<std::shared_ptr<QueuedPublish>> copiedPublishes;
+        std::vector<std::pair<Publish, uint16_t>> copiedPublishes;
         std::vector<uint16_t> copiedQoS2Ids;
 
         {
@@ -266,7 +264,7 @@ void Session::sendAllPendingQosData()
 
                 flowControlQuota--;
 
-                copiedPublishes.push_back(qp);
+                copiedPublishes.emplace_back(pub, qp->getPacketId());
             }
 
             for (const uint16_t packet_id : outgoingQoS2MessageIds)
@@ -275,12 +273,11 @@ void Session::sendAllPendingQosData()
             }
         }
 
-        for(std::shared_ptr<QueuedPublish> &qp : copiedPublishes)
+        for(std::pair<Publish, uint16_t> &p : copiedPublishes)
         {
-            Publish &pub = qp->getPublish();
-            PublishCopyFactory fac(&pub);
-            const bool retain = !c->isRetainedAvailable() ? false : pub.retain;
-            c->writeMqttPacketAndBlameThisClient(fac, pub.qos, qp->getPacketId(), retain);
+            PublishCopyFactory fac(&p.first);
+            const bool retain = !c->isRetainedAvailable() ? false : p.first.retain;
+            c->writeMqttPacketAndBlameThisClient(fac, p.first.qos, p.second, retain);
         }
 
         for(uint16_t id : copiedQoS2Ids)
@@ -292,7 +289,7 @@ void Session::sendAllPendingQosData()
     }
 }
 
-bool Session::hasActiveClient() const
+bool Session::hasActiveClient()
 {
     return !client.expired();
 }
@@ -302,9 +299,9 @@ void Session::clearWill()
     this->willPublish.reset();
 }
 
-std::shared_ptr<WillPublish> &Session::getWill()
+std::shared_ptr<WillPublish> Session::getWill()
 {
-    return this->willPublish;
+    return this->willPublish.getCopy();
 }
 
 void Session::setWill(WillPublish &&pub)
@@ -438,7 +435,7 @@ uint32_t Session::getSessionExpiryInterval() const
     return this->sessionExpiryInterval;
 }
 
-uint32_t Session::getCurrentSessionExpiryInterval() const
+uint32_t Session::getCurrentSessionExpiryInterval()
 {
     if (!this->removalQueued || hasActiveClient())
         return this->sessionExpiryInterval;

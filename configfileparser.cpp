@@ -230,6 +230,8 @@ ConfigFileParser::ConfigFileParser(const std::string &path) :
     validKeys.insert("max_event_loop_drift");
     validKeys.insert("set_retained_message_defer_timeout");
     validKeys.insert("set_retained_message_defer_timeout_spread");
+    validKeys.insert("save_state_interval");
+    validKeys.insert("subscription_node_lifetime");
 
     validListenKeys.insert("port");
     validListenKeys.insert("protocol");
@@ -977,6 +979,8 @@ void ConfigFileParser::loadFile(bool test)
 
                     if (_val == "enabled")
                         tmpSettings.retainedMessagesMode = RetainedMessagesMode::Enabled;
+                    else if (_val == "enabled_without_persistence")
+                        tmpSettings.retainedMessagesMode = RetainedMessagesMode::EnabledWithoutPersistence;
                     else if (_val == "downgrade")
                         tmpSettings.retainedMessagesMode = RetainedMessagesMode::Downgrade;
                     else if (_val == "drop")
@@ -1125,6 +1129,26 @@ void ConfigFileParser::loadFile(bool test)
                         throw ConfigFileException("Option '" + key + "' must 0 or higher.");
 
                     tmpSettings.setRetainedMessageDeferTimeoutSpread = std::chrono::milliseconds(val);
+                }
+
+                if (testKeyValidity(key, "save_state_interval", validKeys))
+                {
+                    const int val = full_stoi(key, value);
+
+                    if (val < 300)
+                        throw ConfigFileException("Option '" + key + "' must 300 or higher.");
+
+                    tmpSettings.saveStateInterval = std::chrono::seconds(val);
+                }
+
+                if (testKeyValidity(key, "subscription_node_lifetime", validKeys))
+                {
+                    const int val = full_stoi(key, value);
+
+                    if (val < 0)
+                        throw ConfigFileException("Option '" + key + "' must 0 or higher.");
+
+                    tmpSettings.subscriptionNodeLifetime = std::chrono::seconds(val);
                 }
             }
         }

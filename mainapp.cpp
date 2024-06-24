@@ -32,6 +32,7 @@ See LICENSE for license details.
 #include "utils.h"
 #include "bridgeconfig.h"
 #include "bridgeinfodb.h"
+#include "globals.h"
 
 MainApp *MainApp::instance = nullptr;
 
@@ -111,7 +112,7 @@ MainApp::MainApp(const std::string &configFilePath) :
     }
 
     auto fSaveState = std::bind(&MainApp::queueSaveStateInThread, this);
-    timer.addCallback(fSaveState, 900000, "Save state.");
+    timer.addCallback(fSaveState, settings.saveStateInterval.count() * 1000, "Save state.");
 
     auto fSendPendingWills = std::bind(&MainApp::queueSendQueuedWills, this);
     timer.addCallback(fSendPendingWills, 2000, "Publish pending wills.");
@@ -292,7 +293,7 @@ void MainApp::saveStateInThread()
     std::list<BridgeInfoForSerializing> bridgeInfos = BridgeInfoForSerializing::getBridgeInfosForSerializing(this->bridgeConfigs);
 
     auto f = std::bind(&MainApp::saveState, this->settings, bridgeInfos, true);
-    this->bgWorker.addTask(f);
+    this->bgWorker.addTask(f, true);
 }
 
 /**
@@ -999,6 +1000,7 @@ void MainApp::start()
 
     pluginLoader.mainDeinit(settings.getFlashmqpluginOpts());
 
+    Globals::getInstance().quitting = true;
     this->bgWorker.waitForStop();
 
     std::list<BridgeInfoForSerializing> bridgeInfos = BridgeInfoForSerializing::getBridgeInfosForSerializing(this->bridgeConfigs);

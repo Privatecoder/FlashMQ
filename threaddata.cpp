@@ -504,6 +504,9 @@ void ThreadData::publishStatsOnDollarTopic(std::vector<std::shared_ptr<ThreadDat
     double aclRegisterWillChecksPerSecond = 0;
     uint64_t aclRegisterWillCheckCount = 0;
 
+    double retainedMessagesSetPerSecond = 0;
+    uint64_t retainedMessagesSetCount = 0;
+
     for (const std::shared_ptr<ThreadData> &thread : threads)
     {
         nrOfClients += thread->getNrOfClients();
@@ -529,6 +532,9 @@ void ThreadData::publishStatsOnDollarTopic(std::vector<std::shared_ptr<ThreadDat
         aclRegisterWillChecksPerSecond += thread->aclRegisterWillChecks.getPerSecond();
         aclRegisterWillCheckCount += thread->aclRegisterWillChecks.get();
 
+        retainedMessagesSetPerSecond += thread->retainedMessageSet.getPerSecond();
+        retainedMessagesSetCount += thread->retainedMessageSet.get();
+
         publishStat("$SYS/broker/threads/" + std::to_string(thread->threadnr) + "/drift/latest__ms", thread->driftCounter.getDrift().count());
         publishStat("$SYS/broker/threads/" + std::to_string(thread->threadnr) + "/drift/moving_avg__ms", thread->driftCounter.getAvgDrift().count());
 
@@ -553,6 +559,9 @@ void ThreadData::publishStatsOnDollarTopic(std::vector<std::shared_ptr<ThreadDat
 
     publishStat("$SYS/broker/load/messages/sent/total", sentMessageCount);
     publishStat("$SYS/broker/load/messages/sent/persecond", sentMessageCountPerSecond);
+
+    publishStat("$SYS/broker/load/messages/set_retained/total", retainedMessagesSetCount);
+    publishStat("$SYS/broker/load/messages/set_retained/persecond", retainedMessagesSetPerSecond);
 
     publishStat("$SYS/broker/load/aclchecks/read/total", aclReadCheckCount);
     publishStat("$SYS/broker/load/aclchecks/read/persecond", aclReadChecksPerSecond);
@@ -706,7 +715,7 @@ void ThreadData::sendAllDisconnects()
 
     for (std::shared_ptr<Client> &c : clientsFound)
     {
-        c->serverInitiatedDisconnect(ReasonCodes::ServerShuttingDown);
+        serverInitiatedDisconnect(c, ReasonCodes::ServerShuttingDown, "");
     }
 
     allDisconnectsSent = true;
@@ -985,6 +994,49 @@ void ThreadData::removeClient(std::shared_ptr<Client> client)
     auto pos = clients_by_fd.find(client->getFd());
     if (pos != clients_by_fd.end() && pos->second == client)
         clients_by_fd.erase(pos);
+}
+
+void ThreadData::serverInitiatedDisconnect(std::shared_ptr<Client> &&client, ReasonCodes reason, const std::string &reason_text)
+{
+    auto c = std::move(client);
+    serverInitiatedDisconnect(c, reason, reason_text);
+}
+
+/**
+ * @brief ThreadData::serverInitiatedDisconnect queues a disconnect packet and when the last bytes are written, the thread loop will disconnect it.
+ * @param client
+ * @param reason
+ * @param reason_text
+ *
+ * Sending clients disconnect packets is only supported by MQTT >= 5, so in case of MQTT3, just close the connection.
+ *
+ * There is a chance that an client's TCP buffers are full (when the client is gone, for example) and epoll will not report the
+ * fd as EPOLLOUT, which means the disconnect will not happen. It will then be up to the keep-alive mechanism to kick the client out.
+ */
+void ThreadData::serverInitiatedDisconnect(const std::shared_ptr<Client> &client, ReasonCodes reason, const std::string &reason_text)
+{
+    if (!client)
+        return;
+
+    auto f = [client, reason, reason_text, this]() {
+        if (!reason_text.empty())
+            client->setDisconnectReason(reason_text);
+        client->setDisconnectReason("Server initiating disconnect with reason: " + reasonCodeToString(reason));
+
+        if (client->getProtocolVersion() >= ProtocolVersion::Mqtt5)
+        {
+            client->setReadyForDisconnect();
+            Disconnect d(ProtocolVersion::Mqtt5, reason);
+            client->writeMqttPacket(d);
+        }
+        else
+        {
+            client->markAsDisconnecting();
+            removeClientQueued(client);
+        }
+    };
+
+    addImmediateTask(f);
 }
 
 void ThreadData::queueDoKeepAliveCheck()

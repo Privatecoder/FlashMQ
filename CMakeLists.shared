@@ -76,6 +76,9 @@ set(FLASHMQ_HEADERS
     ${RELPATH}backgroundworker.h
     ${RELPATH}fmqmain.h
     ${RELPATH}driftcounter.h
+    ${RELPATH}lockedweakptr.h
+    ${RELPATH}lockedsharedptr.h
+    ${RELPATH}globals.h
 )
 
 set(FLASHMQ_IMPLS
@@ -135,4 +138,6 @@ set(FLASHMQ_IMPLS
     ${RELPATH}backgroundworker.cpp
     ${RELPATH}fmqmain.cpp
     ${RELPATH}driftcounter.cpp
+    ${RELPATH}lockedweakptr.cpp
+    ${RELPATH}globals.cpp
     )

@@ -226,6 +226,7 @@ MainTests::MainTests()
     REGISTER_FUNCTION(testDowngradeQoSOnSubscribeQos0to0);
     REGISTER_FUNCTION(testNotMessingUpQosLevels);
     REGISTER_FUNCTION(testUnSubscribe);
+    REGISTER_FUNCTION(testUnsubscribeNonExistingWildcard);
     REGISTER_FUNCTION(testBasicsWithFlashMQTestClient);
     REGISTER_FUNCTION(testDontRemoveSessionGivenToNewClientWithSameId);
     REGISTER_FUNCTION(testKeepSubscriptionOnKickingOutExistingClientWithCleanSessionFalse);
@@ -289,6 +290,7 @@ MainTests::MainTests()
     REGISTER_FUNCTION(testDontUpgradeWildcardDenyMode);
     REGISTER_FUNCTION(testAlsoDontApproveOnErrorInPluginWithWildcardDenyMode);
     REGISTER_FUNCTION(testDenyWildcardSubscription);
+    REGISTER_FUNCTION(testUserPropertiesPresent);
     REGISTER_FUNCTION(testPublishToItself);
     REGISTER_FUNCTION(testNoLocalPublishToItself);
     REGISTER_FUNCTION3(testTopicMatchingInSubscriptionTree);

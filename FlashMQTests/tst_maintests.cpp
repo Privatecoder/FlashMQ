@@ -999,10 +999,10 @@ void MainTests::testSavingSessions()
         }
 
         std::unordered_map<std::string, std::list<SubscriptionForSerializing>> store1Subscriptions;
-        store->getSubscriptions(&store->root, "", true, store1Subscriptions);
+        store1Subscriptions = store->getSubscriptions();
 
         std::unordered_map<std::string, std::list<SubscriptionForSerializing>> store2Subscriptions;
-        store2->getSubscriptions(&store->root, "", true, store2Subscriptions);
+        store2Subscriptions = store2->getSubscriptions();
 
         MYCASTCOMPARE(store1Subscriptions.size(), 4);
         MYCASTCOMPARE(store2Subscriptions.size(), 4);
@@ -1017,26 +1017,29 @@ void MainTests::testSavingSessions()
 
             QCOMPARE(subscList1.size(), subscList2.size());
 
-            auto subs1It = subscList1.begin();
-            auto subs2It = subscList2.begin();
-
-            while (subs1It != subscList1.end())
+            // They're not sorted/deterministic, so resorting to this.
+            for (SubscriptionForSerializing &one : subscList1)
             {
-                SubscriptionForSerializing &one = *subs1It;
-                SubscriptionForSerializing &two = *subs2It;
-                QCOMPARE(one.clientId, two.clientId);
-                QCOMPARE(one.qos, two.qos);
-                QCOMPARE(one.noLocal, two.noLocal);
-                QCOMPARE(one.retainAsPublished, two.retainAsPublished);
+                int match_count = 0;
+                for (SubscriptionForSerializing &two : subscList2)
+                {
+                    if (one.clientId != two.clientId)
+                        continue;
+                    match_count++;
 
-                if (two.noLocal)
-                    noLocalCount++;
+                    QCOMPARE(one.clientId, two.clientId);
+                    QCOMPARE(one.qos, two.qos);
+                    QCOMPARE(one.noLocal, two.noLocal);
+                    QCOMPARE(one.retainAsPublished, two.retainAsPublished);
 
-                if (two.retainAsPublished)
-                    retainAsPublishedCount++;
+                    if (two.noLocal)
+                        noLocalCount++;
 
-                subs1It++;
-                subs2It++;
+                    if (two.retainAsPublished)
+                        retainAsPublishedCount++;
+                }
+                FMQ_COMPARE(match_count, 1);
+
             }
 
         }
@@ -1417,6 +1420,18 @@ void MainTests::testUnSubscribe()
     }));
 }
 
+void MainTests::testUnsubscribeNonExistingWildcard()
+{
+    FlashMQTestClient sender;
+
+    sender.start();
+    sender.connectClient(ProtocolVersion::Mqtt311);
+
+    sender.unsubscribe("#");
+
+    FMQ_VERIFY(true); // I just wanted to test asserts in the code
+}
+
 /**
  * @brief MainTests::testBasicsWithFlashMQTestClient was used to develop FlashMQTestClient.
  */
@@ -1504,7 +1519,7 @@ void MainTests::testDontRemoveSessionGivenToNewClientWithSameId()
     {
         Publish pub("just/a/path", "AAAAA", 0);
         pub.constructPropertyBuilder();
-        pub.propertyBuilder->writeTopicAlias(1);
+        pub.topicAlias = 1;
         sender.publish(pub);
     }
 
@@ -1527,7 +1542,7 @@ void MainTests::testDontRemoveSessionGivenToNewClientWithSameId()
     {
         Publish pub("just/a/path", "AAAAA", 0);
         pub.constructPropertyBuilder();
-        pub.propertyBuilder->writeTopicAlias(1);
+        pub.topicAlias = 1;
         sender.publish(pub);
     }
 
@@ -1571,7 +1586,7 @@ void MainTests::testKeepSubscriptionOnKickingOutExistingClientWithCleanSessionFa
     {
         Publish pub("just/a/path", "AAAAA", 0);
         pub.constructPropertyBuilder();
-        pub.propertyBuilder->writeTopicAlias(1);
+        pub.topicAlias = 1;
         sender.publish(pub);
     }
 
@@ -1617,7 +1632,7 @@ void MainTests::testPickUpSessionWithSubscriptionsAfterDisconnect()
     {
         Publish pub("just/a/path", "AAAAAB", 0);
         pub.constructPropertyBuilder();
-        pub.propertyBuilder->writeTopicAlias(1);
+        pub.topicAlias = 1;
         sender.publish(pub);
     }
 
@@ -1653,14 +1668,14 @@ void MainTests::testIncomingTopicAlias()
     {
         Publish pub("just/a/path", "AAAAA", 0);
         pub.constructPropertyBuilder();
-        pub.propertyBuilder->writeTopicAlias(1);
+        pub.topicAlias = 1;
         sender.publish(pub);
     }
 
     {
         Publish pub2("", "BBBBB", 0);
         pub2.constructPropertyBuilder();
-        pub2.propertyBuilder->writeTopicAlias(1);
+        pub2.topicAlias = 1;
         sender.publish(pub2);
     }
 
@@ -2910,9 +2925,8 @@ void MainTests::testTopicMatchingInSubscriptionTreeHelper(const std::string &sub
 
     store.addSubscription(client, subscribe_subtopics, 0, false, false);
 
-    SubscriptionNode *root = &store.root;
     std::forward_list<ReceivingSubscriber> receivers;
-    store.publishRecursively(publish_subtopics.begin(), publish_subtopics.end(), root, receivers, 0, "fakeclientid");
+    store.publishRecursively(publish_subtopics.begin(), publish_subtopics.end(), store.root.get(), receivers, 0, "fakeclientid");
 
     QVERIFY2(std::distance(receivers.begin(), receivers.end()) == match_count, publish_topic.c_str());
 }

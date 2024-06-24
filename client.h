@@ -161,7 +161,7 @@ public:
     std::string &getMutableUsername();
     std::shared_ptr<WillPublish> &getWill() { return this->willPublish; }
     const std::shared_ptr<WillPublish> &getStagedWill() { return this->stagedWillPublish; }
-    void assignSession(std::shared_ptr<Session> &session);
+    void assignSession(const std::shared_ptr<Session> &session);
     std::shared_ptr<Session> getSession();
     void resetSession();
     void setDisconnectReason(const std::string &reason);
@@ -195,7 +195,6 @@ public:
     uint16_t getMaxIncomingTopicAliasValue() const;
 
     void sendOrQueueWill();
-    void serverInitiatedDisconnect(ReasonCodes reason);
 
     void setRegistrationData(bool clean_start, uint16_t client_receive_max, uint32_t sessionExpiryInterval);
     const std::unique_ptr<StowedClientRegistrationData> &getRegistrationData() const;
